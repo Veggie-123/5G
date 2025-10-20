@@ -1070,24 +1070,6 @@ int main(void)
                 }
 
             }
-            // else if ( flag_banma == 1 && changeroad == 0 ){
-
-            //     if(number > 5){
-            //         result.clear();
-            //         result = yolo_lr.detect(frame); // 进行Yolo检测
-            //         for(auto box : result){//遍历所有的box
-            //             if(box.label == 0){
-            //                 changeroad = 1;
-            //                 cout << "-----------------------------向左变道---------------------------  " << endl;
-            //                 break; // 退出for循环
-            //             }else if(box.label == 1){
-            //                 changeroad = 2;
-            //                 cout << "-----------------------------向右变道---------------------------  " << endl;
-            //                 break; // 退出for循环
-            //             }
-            //         }
-            //     }
-            // }
             else if ( flag_changeroad == 1 && count_bz < 3 ){
 
                 number1++;
@@ -1123,12 +1105,14 @@ int main(void)
                             if(count_bz == 3) {
                                 number = 0;
                             }
+                            
                         }
 
                         last_bz = (box.y2 >= bz_y2) ? 1 : 0;
 
                     }
-
+                    
+                    ////// mark
                     if(bz_get == 1 && count_bz % 2 == 1){
                         bin_image = drawWhiteLine(bin_image, cv::Point(bz_xcenter, bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8); // 绘制避障中心线
                         Tracking_bz(bin_image); // 进行补线后---避障巡线识别
@@ -1137,6 +1121,7 @@ int main(void)
                         bin_image = drawWhiteLine(bin_image, cv::Point(bz_xcenter, bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8); // 绘制避障中心线
                         Tracking_bz(bin_image); // 进行补线后---避障巡线识别
                     }
+                    //////
                 }
             }
             else if(count_bz >= 3 && park_find == 0 ){

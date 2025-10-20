@@ -8,7 +8,7 @@
 const int servo_pin = 12; // 存储舵机引脚号
 const float servo_pwm_range = 10000.0; // 存储舵机PWM范围
 const float servo_pwm_frequency = 50.0; // 存储舵机PWM频率
-const float servo_pwm_duty_cycle_unlock = 690.0; // 存储舵机PWM占空比解锁值
+const float servo_pwm_duty_cycle_unlock = 730.0; // 存储舵机PWM占空比解锁值
 
 const int motor_pin = 13; // 存储电机引脚号
 // const float motor_pwm_range = 36300.0; // 存储电机PWM范围
@@ -23,13 +23,13 @@ float motor_pwm_mid = motor_pwm_duty_cycle_unlock; // 存储舵机中值
 const int yuntai_LR_pin = 22; // 存储云台引脚号
 const float yuntai_LR_pwm_range = 1000.0; // 存储云台PWM范围
 const float yuntai_LR_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_LR_pwm_duty_cycle_unlock = 66.0; //大左小右 
+const float yuntai_LR_pwm_duty_cycle_unlock = 65.0; //大左小右 
 
 
 const int yuntai_UD_pin = 23; // 存储云台引脚号
 const float yuntai_UD_pwm_range = 1000.0; // 存储云台PWM范围
 const float yuntai_UD_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_UD_pwm_duty_cycle_unlock = 73.0; //大上下小
+const float yuntai_UD_pwm_duty_cycle_unlock = 60.0; //大上下小
 
 int parkchose = 2; // 停车车库检测结果
 
@@ -134,19 +134,14 @@ int main(void)
     
     // sleep(3);
 
-         gpioPWM(12, 825); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(1200000); // RIGHT弯道
-        // usleep(1000000); // LEFT弯道
-        gpioPWM(12, 610); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1300); // 设置电机PWM
-        usleep(800000); // 延时550毫秒
-        gpioPWM(12, 690); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1400); // 设置电机PWM
+         gpioPWM(12, servo_pwm_duty_cycle_unlock); // 设置舵机PWM
+        gpioPWM(13, motor_pwm_mid + 1000); // 设置电机PWM
+        sleep(10); 
+
 
     // gpioPWM(13,motor_pwm_duty_cycle_unlock + 000); // 设置电机PWM
 
-    system("sudo -u pi /home/pi/.nvm/versions/node/v12.22.12/bin/node /home/pi/network-rc/we2hdu.js"); // 播放音频文件
+    //system("sudo -u pi /home/pi/.nvm/versions/node/v12.22.12/bin/node /home/pi/network-rc/we2hdu.js"); // 播放音频文件
 
     //----------------------------------向左变道--------------
     // gpioPWM(12, 800); // 设置舵机PWM
