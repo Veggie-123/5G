@@ -75,16 +75,46 @@ float motor_pwm_mid = 11400.0; // 存储电机解锁值
 const int yuntai_LR_pin = 22; // 存储云台引脚号
 const float yuntai_LR_pwm_range = 1000.0; // 存储云台PWM范围
 const float yuntai_LR_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_LR_pwm_duty_cycle_unlock = 65.0; //大左小右 
+const float yuntai_LR_pwm_duty_cycle_unlock = 63.0; //大左小右 
 
 const int yuntai_UD_pin = 23; // 存储云台引脚号
 const float yuntai_UD_pwm_range = 1000.0; // 存储云台PWM范围
 const float yuntai_UD_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_UD_pwm_duty_cycle_unlock = 60.0; //大上下小
+const float yuntai_UD_pwm_duty_cycle_unlock = 58.0; //大上下小
 
 int first_bz_get = 0;
 int number = 0;
 int number1 = 0;
+
+//---------------平滑滤波相关-------------------------------------------------
+std::vector<cv::Point> last_mid; // 存储上一次的中线，用于平滑滤波
+int blue_detect_count = 0; // 蓝色挡板连续检测计数
+const int BLUE_DETECT_THRESHOLD = 10; // 需要连续检测到的帧数才能确认找到蓝色挡板
+
+//---------------蓝色检测参数------------------------------------------
+// HSV颜色范围
+const int BLUE_H_MIN = 100;  // 色调H最小值
+const int BLUE_H_MAX = 130;  // 色调H最大值
+const int BLUE_S_MIN = 50;   // 饱和度S最小值
+const int BLUE_S_MAX = 255;  // 饱和度S最大值
+const int BLUE_V_MIN = 50;   // 亮度V最小值
+const int BLUE_V_MAX = 255;  // 亮度V最大值
+
+// 蓝色检测ROI区域（限制检测范围）
+const int BLUE_ROI_X = 50;      // ROI左上角X坐标
+const int BLUE_ROI_Y = 80;      // ROI左上角Y坐标
+const int BLUE_ROI_WIDTH = 220;  // ROI宽度
+const int BLUE_ROI_HEIGHT = 100; // ROI高度
+
+// 蓝色面积阈值
+const double BLUE_AREA_VALID = 2000.0; // 有效面积阈值
+
+// 蓝色挡板移开检测参数
+const double BLUE_REMOVE_AREA_MIN = 100.0; // 移开检测的最小面积阈值（过滤小噪点）
+
+//---------------性能优化选项-------------------------------------------------
+// 如果树莓派性能不足，可以设置为1以使用更快的处理方式（可能会略微降低效果）
+const int FAST_MODE = 0; // 0=正常模式（质量优先），1=快速模式（速度优先）
 
 // 定义舵机和电机PWM初始化函数
 void servo_motor_pwmInit(void) 
@@ -207,8 +237,10 @@ cv::Mat ImageSobel(cv::Mat &frame)
     Mat grayImage;
     cvtColor(frame, grayImage, cv::COLOR_BGR2GRAY);
 
-    int kernelSize = 5;
-    double sigma = 1.0;
+    // 增强高斯模糊以减少噪声，对模糊线条更有效
+    // 【性能优化】根据FAST_MODE调整模糊强度
+    int kernelSize = (FAST_MODE == 0) ? 5 : 3; // 快速模式用更小的kernel
+    double sigma = (FAST_MODE == 0) ? 1.5 : 1.0; // 快速模式用更小的sigma
     cv::Mat blurredImage;
     cv::GaussianBlur(grayImage, blurredImage, cv::Size(kernelSize, kernelSize), sigma);
 
@@ -223,19 +255,34 @@ cv::Mat ImageSobel(cv::Mat &frame)
     Mat gradientMagnitude = abs(sobelY);
     convertScaleAbs(gradientMagnitude, gradientMagnitude);
 
-    // 阈值分割并膨胀操作
-    cv::threshold(gradientMagnitude, binaryImage, 0, 255, cv::THRESH_BINARY + cv::THRESH_OTSU);
-    Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-    cv::dilate(binaryImage, binaryImage, kernel,cv::Point(-1, -1), 1);
-
-    // 定义感兴趣区域 (ROI)
+    // 使用自适应阈值，提高阈值以减少噪声
+    double threshold_value = 0;
+    cv::threshold(gradientMagnitude, binaryImage, threshold_value, 255, cv::THRESH_BINARY + cv::THRESH_OTSU);
+    
+    // 【性能优化】先裁剪ROI，只在ROI区域进行形态学操作，大幅提升速度
+    // ROI区域只有 318x46 像素，比全图 320x240 小很多
     const int x_roi = 1, y_roi = 109, width_roi = 318, height_roi = 46;
     Rect roi(x_roi, y_roi, width_roi, height_roi);
-    Mat croppedImage = binaryImage(roi);
+    Mat croppedImage = binaryImage(roi);  // 先裁剪
+    
+    // 在ROI区域进行形态学操作（处理面积从76800像素降到14628像素，速度提升约5倍）
+    if (FAST_MODE == 0) {
+        // 正常模式：先进行闭运算，连接断开的线条（对模糊线条很重要）
+        Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 3)); // 横向连接
+        cv::morphologyEx(croppedImage, croppedImage, cv::MORPH_CLOSE, kernel_close);
+        
+        // 再进行膨胀操作
+        Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+        cv::dilate(croppedImage, croppedImage, kernel, cv::Point(-1, -1), 1);
+    } else {
+        // 快速模式：跳过闭运算，只做一次较小的膨胀（速度更快，但可能对模糊线条效果略差）
+        Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 2)); // 更小的kernel
+        cv::dilate(croppedImage, croppedImage, kernel, cv::Point(-1, -1), 1);
+    }
 
-    // 使用概率霍夫变换检测直线
+    // 使用概率霍夫变换检测直线，提高阈值以减少噪声
     vector<Vec4i> lines;
-    HoughLinesP(croppedImage, lines, 1, CV_PI / 180, 25, 15, 10);
+    HoughLinesP(croppedImage, lines, 1, CV_PI / 180, 30, 20, 15); // 提高阈值：25->30, 15->20, 10->15
 
     // 遍历直线并筛选有效线段
     for (const auto &l : lines) 
@@ -244,8 +291,8 @@ cv::Mat ImageSobel(cv::Mat &frame)
         double angle = atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
         double length = hypot(l[3] - l[1], l[2] - l[0]);
 
-        // 筛选条件：角度范围、最小长度
-        if (abs(angle) > 15) 
+        // 筛选条件：角度范围、最小长度（提高最小长度要求）
+        if (abs(angle) > 15 && length > 12) // 增加最小长度限制
         {
             // 调整坐标以适应全图
             Vec4i adjustedLine = l;
@@ -273,7 +320,19 @@ void Tracking(cv::Mat &dilated_image)
         return;
     }
 
+    // 如果上一次有有效数据，使用上一次的中点作为起始点，否则使用默认值
     int begin = 160; // 初始化起始位置
+    if (!last_mid.empty() && last_mid.size() >= 20) 
+    {
+        // 使用上一次中线的平均值作为起始搜索点，提高稳定性
+        int sum_x = 0;
+        for (size_t i = 0; i < std::min((size_t)20, last_mid.size()); ++i) 
+        {
+            sum_x += last_mid[i].x;
+        }
+        begin = sum_x / std::min((size_t)20, last_mid.size());
+    }
+
     left_line.clear(); // 清空左线条
     right_line.clear(); // 清空右线条
     mid.clear(); // 清空中线
@@ -329,6 +388,9 @@ void Tracking(cv::Mat &dilated_image)
         // 更新下一行的搜索起点
         begin = mid_x;
     }
+    
+    // 保存当前中线数据供下一帧使用
+    last_mid = mid;
 }
 
 // 比较两个轮廓的面积
@@ -340,58 +402,72 @@ bool Contour_Area(vector<Point> contour1, vector<Point> contour2)
 // 定义蓝色挡板 寻找函数
 void blue_card_find(void)  // 输入为mask图像
 {   
-    cout << "进入 蓝色挡板寻找 进程！" << endl;
-
     Mat change_frame; // 存储颜色空间转换后的图像
     cvtColor(frame, change_frame, COLOR_BGR2HSV); // 转换颜色空间
 
     Mat mask; // 存储掩码图像
 
     // 定义HSV范围 hsv颜色空间特点：色调H、饱和度S、亮度V
-    Scalar scalarl = Scalar(105, 60, 60);  // HSV的低值
-    Scalar scalarH = Scalar(120, 255, 200); // HSV的高值 
+    Scalar scalarl = Scalar(BLUE_H_MIN, BLUE_S_MIN, BLUE_V_MIN); // HSV的低值
+    Scalar scalarH = Scalar(BLUE_H_MAX, BLUE_S_MAX, BLUE_V_MAX);  // HSV的高值
     inRange(change_frame, scalarl, scalarH, mask); // 创建掩码
+
+    // 限制检测区域到画面中央区域，减少边缘干扰
+    cv::Rect roi_blue(BLUE_ROI_X, BLUE_ROI_Y, BLUE_ROI_WIDTH, BLUE_ROI_HEIGHT);
+    Mat mask_roi = mask(roi_blue);
 
     vector<vector<Point>> contours; // 存储轮廓的向量
     vector<Vec4i> hierarcy; // 存储层次结构的向量
-    findContours(mask, contours, hierarcy, RETR_EXTERNAL, CHAIN_APPROX_NONE); // 查找轮廓
+    findContours(mask_roi, contours, hierarcy, RETR_EXTERNAL, CHAIN_APPROX_NONE); // 查找轮廓
+    
     if (contours.size() > 0) // 如果找到轮廓
     {
         sort(contours.begin(), contours.end(), Contour_Area); // 按轮廓面积排序
-        vector<vector<Point>> newContours; // 存储新的轮廓向量
+        double max_area = contourArea(contours[0]);
+        cout << "蓝色检测: 最大面积=" << (int)max_area;
+        
+        vector<vector<Point>> newContours; // 存储新的轮廓向量（满足所有条件的）
+        
         for (const vector<Point> &contour : contours) // 遍历每个轮廓
         {
-            Point2f center; // 存储中心点
-            float radius; // 存储半径
-            minEnclosingCircle(contour, center, radius); // 找到最小包围圆
-            if (center.y > 90 && center.y < 160) // 如果中心点在指定范围内
+            double area = contourArea(contour);
+            // 只保留面积 >= BLUE_AREA_VALID 的轮廓
+            if (area >= BLUE_AREA_VALID) 
             {
-                newContours.push_back(contour); // 添加到新的轮廓向量中
+                newContours.push_back(contour);
             }
         }
 
-        contours = newContours; // 更新轮廓向量
-        cout << "检测到蓝色物体：面积为" << contourArea(contours[0]) << endl;
-        if (contours.size() > 0) // 如果新的轮廓向量不为空
+        // 连续检测计数机制：只有连续多帧都检测到才确认
+        if (newContours.size() > 0)
         {
-            if (contourArea(contours[0]) > 500) // 如果最大的轮廓面积大于300
+            blue_detect_count++; // 增加计数
+            cout << " -> 有效目标，计数=" << blue_detect_count << "/" << BLUE_DETECT_THRESHOLD << endl;
+            
+            if (blue_detect_count >= BLUE_DETECT_THRESHOLD) // 连续检测到足够帧数
             {
-                cout << "找到蓝色挡板 达到面积！" << endl; // 输出找到最大的蓝色物体
-                // Point2f center; // 存储中心点
-                // float radius; // 存储半径
-                // minEnclosingCircle(contours[0], center, radius); // 找到最小包围圆
-                // circle(frame, center, static_cast<int>(radius), Scalar(0, 255, 0), 2); // 在图像上画圆
+                cout << ">>> 找到蓝色挡板！连续检测通过！ <<<" << endl;
                 find_first = 1; // 更新标志位
+                blue_detect_count = 0; // 重置计数
             }
-            else
+        }
+        else
+        {
+            // 如果没有检测到或面积不够，重置计数
+            cout << " (无效或面积不足)" << endl;
+            if (blue_detect_count > 0) 
             {
-                cout << "找到蓝色挡板 未达到面积！" << endl; // 输出未找到蓝色物体
+                blue_detect_count = 0;
             }
         }
     }
     else
     {
-        cout << "未找到蓝色物体" << endl; // 输出未找到蓝色物体
+        // 如果没找到轮廓，重置计数
+        if (blue_detect_count > 0) 
+        {
+            blue_detect_count = 0;
+        }
     }
 }
 
@@ -405,28 +481,26 @@ void blue_card_remove(void) // 输入为mask图像
 
     Mat mask; // 存储掩码图像
 
-    // 定义HSV范围 hsv颜色空间特点：色调H、饱和度S、亮度V
-    Scalar scalarl = Scalar(105, 60, 60);  // HSV的低值
-    Scalar scalarH = Scalar(120, 255, 200); // HSV的高值 
+    // 定义HSV范围 hsv颜色空间特点：色调H、饱和度S、亮度V（使用与blue_card_find相同的参数）
+    Scalar scalarl = Scalar(BLUE_H_MIN, BLUE_S_MIN, BLUE_V_MIN); // HSV的低值
+    Scalar scalarH = Scalar(BLUE_H_MAX, BLUE_S_MAX, BLUE_V_MAX);  // HSV的高值 
     inRange(change_frame, scalarl, scalarH, mask); // 创建掩码
+
+    // 使用与blue_card_find相同的ROI区域进行裁剪
+    cv::Rect roi_blue(BLUE_ROI_X, BLUE_ROI_Y, BLUE_ROI_WIDTH, BLUE_ROI_HEIGHT);
+    Mat mask_roi = mask(roi_blue);
 
     vector<vector<Point>> contours; // 定义轮廓向量
     vector<Vec4i> hierarcy; // 定义层次结构向量
-    findContours(mask, contours, hierarcy, RETR_EXTERNAL, CHAIN_APPROX_NONE); // 查找轮廓
+    findContours(mask_roi, contours, hierarcy, RETR_EXTERNAL, CHAIN_APPROX_NONE); // 查找轮廓
 
-    // 过滤出“有效蓝色轮廓”（面积足够大且位置合理）
+    // 过滤出"有效蓝色轮廓"（只检查面积，位置已由ROI限制）
     vector<vector<Point>> validContours;
     for (const auto &contour : contours) 
     {
         // 过滤面积过小的干扰
         double area = contourArea(contour);
-        if (area < 100) 
-            continue;
-
-        Point2f center;
-        float radius;
-        minEnclosingCircle(contour, center, radius);
-        if (center.y > 60 && center.y < 190)  
+        if (area >= BLUE_REMOVE_AREA_MIN) 
         {
             validContours.push_back(contour);
         }
@@ -557,7 +631,7 @@ int find_parking(cv::Mat frame) {
 
 float servo_pd(int target) { // 赛道巡线控制
 
-    int pidx = int((mid[23].x + mid[20].x + mid[25].x) / 3); // 计算中线中点的x坐标
+    int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
     cout << " PIDX: " << pidx << endl;  
 
@@ -576,9 +650,9 @@ float servo_pd(int target) { // 赛道巡线控制
     {
         servo_pwm = 1000; // 限制PWM值为900
     }
-    else if (servo_pwm < 600) // 如果PWM值小于600
+    else if (servo_pwm < 580) // 如果PWM值小于600
     {
-        servo_pwm = 600; // 限制PWM值为600
+        servo_pwm = 580; // 限制PWM值为600
     }
     return servo_pwm; // 返回舵机PWM值
 }
@@ -653,20 +727,21 @@ void motor_servo_contral()
                 servo_pwm_now = servo_pwm_mid;
             } else {
                 servo_pwm_now = servo_pd(160); 
+                cerr << "找到有效线" << endl;
             }
             if(number < 10){
-                gpioPWM(motor_pin, motor_pwm_mid); 
+                gpioPWM(motor_pin, motor_pwm_mid + 1800); 
             }else if (number < 500){
-                gpioPWM(motor_pin, motor_pwm_mid); 
+                gpioPWM(motor_pin, motor_pwm_mid + 1500); 
                 cout << "巡线-----------------------弯道1 舵机PWM:  " << servo_pwm_now << endl;
             }else if (number < 550){
-                gpioPWM(motor_pin, motor_pwm_mid + 1000); 
+                gpioPWM(motor_pin, motor_pwm_mid + 1500); 
                 cout << "巡线-----------------------弯道2 舵机PWM:  " << servo_pwm_now << endl;
             }else if (number < 600){
-                gpioPWM(motor_pin, motor_pwm_mid + 1000); 
+                gpioPWM(motor_pin, motor_pwm_mid + 1500); 
                 cout << "巡线-----------------------弯道3 舵机PWM:  " << servo_pwm_now << endl;
             }else{
-                gpioPWM(motor_pin, motor_pwm_mid + 1000); 
+                gpioPWM(motor_pin, motor_pwm_mid + 1500); 
                 cout << "巡线-----------------------弯道4 舵机PWM:  " << servo_pwm_now << endl;
             }
             gpioPWM(servo_pin, servo_pwm_now);
@@ -740,6 +815,8 @@ int main(void)
             if ( banma == 0 ){
 
                 bin_image = ImageSobel(frame); // 图像预处理
+                //imshow("预处理后的图像", bin_image); // 显示预处理后的图像
+                //waitKey(1); // 更新显示窗口
                 Tracking(bin_image); // 进行巡线识别
 
                 if(number > 600){

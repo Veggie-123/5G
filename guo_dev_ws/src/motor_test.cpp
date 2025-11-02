@@ -23,13 +23,13 @@ float motor_pwm_mid = motor_pwm_duty_cycle_unlock; // 存储舵机中值
 const int yuntai_LR_pin = 22; // 存储云台引脚号
 const float yuntai_LR_pwm_range = 1000.0; // 存储云台PWM范围
 const float yuntai_LR_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_LR_pwm_duty_cycle_unlock = 65.0; //大左小右 
+const float yuntai_LR_pwm_duty_cycle_unlock = 63.0; //大左小右 
 
 
 const int yuntai_UD_pin = 23; // 存储云台引脚号
 const float yuntai_UD_pwm_range = 1000.0; // 存储云台PWM范围
 const float yuntai_UD_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_UD_pwm_duty_cycle_unlock = 60.0; //大上下小
+const float yuntai_UD_pwm_duty_cycle_unlock = 65.0; //大上下小
 
 int parkchose = 2; // 停车车库检测结果
 
@@ -130,13 +130,13 @@ int main(void)
     // gpioPWM(12, servo_pwm_mid); // 设置舵机PWM
     // gpioPWM(13, 11300); // 设置电机PWM
 
-    gpioPWM(13,motor_pwm_duty_cycle_unlock + 000); // 设置电机PWM
+    gpioPWM(13,motor_pwm_mid + 00); // 设置电机PWM
     
     // sleep(3);
 
-         gpioPWM(12, servo_pwm_duty_cycle_unlock); // 设置舵机PWM
-        gpioPWM(13, motor_pwm_mid + 1000); // 设置电机PWM
-        sleep(10); 
+    gpioPWM(12, servo_pwm_duty_cycle_unlock); // 设置舵机PWM
+    gpioPWM(13, motor_pwm_mid + 00); // 设置电机PWM
+    sleep(10); 
 
 
     // gpioPWM(13,motor_pwm_duty_cycle_unlock + 000); // 设置电机PWM
