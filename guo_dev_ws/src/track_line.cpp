@@ -142,6 +142,7 @@ const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 //---------------性能优化选项-------------------------------------------------
 // 如果树莓派性能不足，可以设置为1以使用更快的处理方式（可能会略微降低效果）
 const int FAST_MODE = 0; // 0=正常模式（质量优先），1=快速模式（速度优先）
+const int MIN_COMPONENT_AREA = 400;
 
 // 定义舵机和电机PWM初始化函数
 void servo_motor_pwmInit(void) 
@@ -252,95 +253,94 @@ cv::Mat drawWhiteLine(cv::Mat binaryImage, cv::Point start, cv::Point end, int l
 
 cv::Mat ImageSobel(cv::Mat &frame) 
 {
-    // 定义图像宽度和高度
-    const int width = 320;
-    const int height = 240;
-
-    // 初始化二值输出图像
-    Mat binaryImage = Mat::zeros(height, width, CV_8U);
-    Mat binaryImage_1 = Mat::zeros(height, width, CV_8U);
-
-    // 转换输入图像为灰度图像
-    Mat grayImage;
-    cvtColor(frame, grayImage, cv::COLOR_BGR2GRAY);
-
-    // 增强高斯模糊以减少噪声，对模糊线条更有效
-    // 【性能优化】根据FAST_MODE调整模糊强度
-    int kernelSize = (FAST_MODE == 0) ? 5 : 3; // 快速模式用更小的kernel
-    double sigma = (FAST_MODE == 0) ? 1.5 : 1.0; // 快速模式用更小的sigma
-    cv::Mat blurredImage;
-    cv::GaussianBlur(grayImage, blurredImage, cv::Size(kernelSize, kernelSize), sigma);
-
-    // Sobel 边缘检测
-    // Mat sobelX;
-    Mat sobelY;
-    // Sobel(blurredImage, sobelX, CV_64F, 1, 0, 3); // x方向梯度
-    Sobel(blurredImage, sobelY, CV_64F, 0, 1, 3); // y方向梯度
-
-    // 计算梯度幅值并转换为 8 位图像
-    // Mat gradientMagnitude = abs(sobelX) + abs(sobelY);
-    Mat gradientMagnitude = abs(sobelY);
-    convertScaleAbs(gradientMagnitude, gradientMagnitude);
-
-    // 使用固定阈值替代OTSU，保留更多稀疏边缘（OTSU阈值过高会丢失弱边缘）
-    double threshold_value = 40;  // 固定阈值40，可根据实际效果调整（范围：20-60）
-    cv::threshold(gradientMagnitude, binaryImage, threshold_value, 255, cv::THRESH_BINARY);
-    // 原OTSU方法（注释掉）：threshold(gradientMagnitude, binaryImage, 0, 255, THRESH_BINARY + THRESH_OTSU);
-    
-    // 【性能优化】先裁剪ROI，只在ROI区域进行形态学操作，大幅提升速度
-    // ROI区域只有 318x46 像素，比全图 320x240 小很多
-    const int x_roi = 1, y_roi = 109, width_roi = 318, height_roi = 46;
-    Rect roi(x_roi, y_roi, width_roi, height_roi);
-    Mat croppedImage = binaryImage(roi);  // 先裁剪
-    
-    // 在ROI区域进行形态学操作（处理面积从76800像素降到14628像素，速度提升约5倍）
-    if (FAST_MODE == 0) {
-        // 正常模式：先进行闭运算，连接断开的线条（对稀疏线条很重要）
-        // 增大kernel以更好连接稀疏线条：横向从5增加到9，纵向从3增加到5
-        Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9, 5)); // 横向连接
-        cv::morphologyEx(croppedImage, croppedImage, cv::MORPH_CLOSE, kernel_close);
-        
-        // 再进行膨胀操作，增大kernel以弥补稀疏区域
-        Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
-        cv::dilate(croppedImage, croppedImage, kernel, cv::Point(-1, -1), 1);
+    const cv::Size targetSize(320, 240);
+    cv::Mat resizedFrame;
+    if (frame.size() != targetSize) {
+        cv::resize(frame, resizedFrame, targetSize);
     } else {
-        // 快速模式：使用较大的闭运算连接稀疏线条
-        Mat kernel_close = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 3));
-        cv::morphologyEx(croppedImage, croppedImage, cv::MORPH_CLOSE, kernel_close);
-        
-        Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-        cv::dilate(croppedImage, croppedImage, kernel, cv::Point(-1, -1), 1);
+        resizedFrame = frame.clone();
     }
 
-    // 使用概率霍夫变换检测直线，降低阈值以捕获更多稀疏线段
-    vector<Vec4i> lines;
-    HoughLinesP(croppedImage, lines, 1, CV_PI / 180, 20, 15, 8); // 降低阈值：30->20, 20->15, 15->8
+    const cv::Rect roiRect(1, 109, 318, 46);             // 巡线ROI区域
+    cv::Mat roiFrame = resizedFrame(roiRect).clone();    // 提取ROI做后续处理
 
-    // 遍历直线并筛选有效线段
-    for (const auto &l : lines) 
-    {
-        // 计算直线角度和长度
-        double angle = atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
-        double length = hypot(l[3] - l[1], l[2] - l[0]);
+    cv::Mat grayImage;
+    cv::cvtColor(roiFrame, grayImage, cv::COLOR_BGR2GRAY); // ROI灰度化
 
-        // 筛选条件：角度范围、最小长度（降低最小长度要求以捕获更多短线段）
-        if (abs(angle) > 15 && length > 8) // 降低最小长度：12->8
-        {
-            // 调整坐标以适应全图
-            Vec4i adjustedLine = l;
-            adjustedLine[0] += x_roi;
-            adjustedLine[1] += y_roi;
-            adjustedLine[2] += x_roi;
-            adjustedLine[3] += y_roi;
+    int kernelSize = (FAST_MODE == 0) ? 5 : 3;
+    cv::blur(grayImage, grayImage, cv::Size(kernelSize, kernelSize)); // 均值滤波降噪
 
-            // 绘制白线，增加线宽以填充间隙
-            line(binaryImage_1, Point(adjustedLine[0], adjustedLine[1]),
-                Point(adjustedLine[2], adjustedLine[3]), Scalar(255), 3, LINE_AA); // 线宽从2增加到3
+    cv::Mat sobelX, sobelY;
+    cv::Sobel(grayImage, sobelX, CV_64F, 1, 0, 3);        // X方向梯度
+    cv::Sobel(grayImage, sobelY, CV_64F, 0, 1, 3);        // Y方向梯度
+    cv::Mat gradientMagnitude = cv::abs(sobelY) + 0.5 * cv::abs(sobelX); //Y主导的综合梯度
+    cv::Mat gradientMagnitude8U;
+    cv::convertScaleAbs(gradientMagnitude, gradientMagnitude8U); // 转回8位方便阈值处理
+
+    cv::Mat hsvImage;
+    cv::cvtColor(roiFrame, hsvImage, cv::COLOR_BGR2HSV); // HSV分离亮度信息
+    std::vector<cv::Mat> hsvChannels;
+    cv::split(hsvImage, hsvChannels);                    // 拆分H/S/V
+
+    cv::Mat claheOutput;
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(4, 4)); // 自适应直方图均衡
+    clahe->apply(hsvChannels[2], claheOutput);                        // 仅处理V通道
+    cv::GaussianBlur(claheOutput, claheOutput, cv::Size(5, 5), 0);    // 平滑提升稳定性
+
+    cv::Mat adaptiveMask;
+    cv::adaptiveThreshold(claheOutput, adaptiveMask, 255,
+                          cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY,
+                          31, -10);                                   // 自适应阈值提取亮线
+
+    cv::Mat gradientMask;
+    cv::threshold(gradientMagnitude8U, gradientMask, 40, 255, cv::THRESH_BINARY); // 梯度二值掩码
+
+    cv::Mat binaryMask;
+    cv::bitwise_and(adaptiveMask, gradientMask, binaryMask);          // 亮度+梯度联合约束
+
+    cv::medianBlur(binaryMask, binaryMask, 3);                        // 中值去椒盐噪声
+    cv::Mat noiseKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_OPEN, noiseKernel); // 小结构开运算
+
+    cv::Mat morphImage = binaryMask.clone();
+    cv::Mat kernelClose = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9, 5)); // 闭运算连接断裂
+    cv::morphologyEx(morphImage, morphImage, cv::MORPH_CLOSE, kernelClose);
+    cv::Mat kernelDilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)); // 膨胀加粗车道线
+    cv::dilate(morphImage, morphImage, kernelDilate, cv::Point(-1, -1), 1);
+
+    cv::Mat labels, stats, centroids;
+    int numLabels = cv::connectedComponentsWithStats(morphImage, labels, stats, centroids, 8, CV_32S); // 连通域分析
+    cv::Mat filteredMorph = cv::Mat::zeros(morphImage.size(), CV_8U);
+    for (int i = 1; i < numLabels; ++i) {
+        if (stats.at<int>(i, cv::CC_STAT_AREA) >= MIN_COMPONENT_AREA) {
+            filteredMorph.setTo(255, labels == i);
+        }
+    }
+    morphImage = filteredMorph;
+
+    std::vector<cv::Vec4i> lines;
+    cv::HoughLinesP(morphImage, lines, 1, CV_PI / 180, 20, 15, 8);
+
+    cv::Mat finalImage = cv::Mat::zeros(targetSize, CV_8U);
+    for (const auto &l : lines) {
+        double angle = std::atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
+        double length = std::hypot(l[3] - l[1], l[2] - l[0]);
+
+        if (std::abs(angle) > 15 && length > 8) {
+            cv::Vec4i adjustedLine = l;
+            adjustedLine[0] += roiRect.x;
+            adjustedLine[1] += roiRect.y;
+            adjustedLine[2] += roiRect.x;
+            adjustedLine[3] += roiRect.y;
+
+            cv::line(finalImage,
+                     cv::Point(adjustedLine[0], adjustedLine[1]),
+                     cv::Point(adjustedLine[2], adjustedLine[3]),
+                     cv::Scalar(255), 3, cv::LINE_AA);
         }
     }
 
-    // 返回最终的处理图像
-    return binaryImage_1;
+    return finalImage;
 }
 
 void Tracking(cv::Mat &dilated_image) 
