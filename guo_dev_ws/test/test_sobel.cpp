@@ -13,6 +13,7 @@ using namespace std;
 using namespace cv;
 
 const int FAST_MODE = 0;
+const int MIN_COMPONENT_AREA = 400;
 
 int main(int argc, char** argv) {
     string imgPath;
@@ -41,56 +42,88 @@ int main(int argc, char** argv) {
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    // 灰度图
-    Mat grayImage;
-    cvtColor(resizedFrame, grayImage, COLOR_BGR2GRAY);
-    imshow("2. Gray", grayImage);
+    Rect roiRect(1, 109, 318, 46);
+    Mat roiFrame = resizedFrame(roiRect).clone();
+    imshow("2. ROI", roiFrame);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    // 高斯模糊
+    // 灰度图
+    Mat grayImage;
+    cvtColor(roiFrame, grayImage, COLOR_BGR2GRAY);
+    imshow("3. Gray", grayImage);
+    cout << "按任意键继续..." << endl;
+    waitKey(0);
+    
+    // 均值滤波
     Mat blurredImage;
-    GaussianBlur(grayImage, blurredImage, Size(5, 5), 1.5);
-    imshow("3. Blurred", blurredImage);
+    blur(grayImage, blurredImage, Size(5, 5));
+    imshow("4. Blurred", blurredImage);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
     // Sobel边缘检测
-    Mat sobelY;
-    Sobel(blurredImage, sobelY, CV_64F, 0, 1, 3);
-    Mat gradientMagnitude = abs(sobelY);
+    Mat sobelX, sobelY;
+    Sobel(blurredImage, sobelX, CV_64F, 1, 0, 3); // x方向梯度
+    Sobel(blurredImage, sobelY, CV_64F, 0, 1, 3); // y方向梯度
+    Mat gradientMagnitude = cv::abs(sobelY) + 0.5 * cv::abs(sobelX); // x方向权重减半
     Mat gradientMagnitude_8u;
     convertScaleAbs(gradientMagnitude, gradientMagnitude_8u);
-    imshow("4. Sobel Gradient", gradientMagnitude_8u);
+    imshow("5. Sobel Gradient", gradientMagnitude_8u);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    // 二值化 - 先用固定阈值替代OTSU（尝试更低的阈值保留更多边缘）
-    Mat binaryImage;
-    // 方案1：尝试较低的固定阈值（如30-50）
-    threshold(gradientMagnitude_8u, binaryImage, 40, 255, THRESH_BINARY);
-    
-    // 方案2：如果需要测试OTSU，先打印阈值看看
-    // double otsu_threshold = threshold(gradientMagnitude_8u, binaryImage, 0, 255, THRESH_BINARY + THRESH_OTSU);
-    // cout << "OTSU计算出的阈值: " << otsu_threshold << endl;
-    
-    imshow("5. Binary", binaryImage);
+    // 颜色空间转换 + 自适应阈值，增强不同场景下的白色跑道线
+    Mat hsvImage;
+    cvtColor(roiFrame, hsvImage, COLOR_BGR2HSV);
+    vector<Mat> hsvChannels;
+    split(hsvImage, hsvChannels); // H, S, V
+
+    Mat claheOutput;
+    Ptr<CLAHE> clahe = createCLAHE(2.0, Size(4, 4));
+    clahe->apply(hsvChannels[2], claheOutput);
+    GaussianBlur(claheOutput, claheOutput, Size(5, 5), 0);
+    imshow("6. CLAHE V Channel", claheOutput);
+    cout << "按任意键继续..." << endl;
+    waitKey(0);  
+
+    Mat adaptiveMask;
+    adaptiveThreshold(claheOutput, adaptiveMask, 255,
+                        ADAPTIVE_THRESH_MEAN_C, THRESH_BINARY,
+                      31, -10);
+    imshow("7. Adaptive Mask", adaptiveMask);
     cout << "按任意键继续..." << endl;
     waitKey(0);
-    
-    // ROI裁剪
-    Mat croppedImage = binaryImage(Rect(1, 109, 318, 46));
-    imshow("6. Cropped ROI", croppedImage);
+
+    Mat binaryImage = adaptiveMask.clone();
+
+    medianBlur(binaryImage, binaryImage, 3);
+
+    Mat noiseKernel = getStructuringElement(MORPH_RECT, Size(3, 3));
+    morphologyEx(binaryImage, binaryImage, MORPH_OPEN, noiseKernel);
+
+    imshow("8. Binary", binaryImage);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
     // 形态学操作
-    Mat morphImage = croppedImage.clone();
+    Mat morphImage = binaryImage.clone();
     Mat kernel_close = getStructuringElement(MORPH_RECT, Size(9, 5));
     morphologyEx(morphImage, morphImage, MORPH_CLOSE, kernel_close);
     Mat kernel = getStructuringElement(MORPH_RECT, Size(5, 5));
     dilate(morphImage, morphImage, kernel, Point(-1, -1), 1);
-    imshow("7. Morphed", morphImage);
+
+    Mat labels, stats, centroids;
+    int numLabels = connectedComponentsWithStats(morphImage, labels, stats, centroids, 8, CV_32S);
+    Mat filteredMorph = Mat::zeros(morphImage.size(), CV_8U);
+    for (int i = 1; i < numLabels; ++i) {
+        if (stats.at<int>(i, CC_STAT_AREA) >= MIN_COMPONENT_AREA) {
+            filteredMorph.setTo(255, labels == i);
+        }
+    }
+    morphImage = filteredMorph;
+
+    imshow("9. Morphed", morphImage);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
@@ -111,8 +144,8 @@ int main(int argc, char** argv) {
         
         if (abs(angle) > 15 && length > 8) {
             Vec4i adjustedLine = l;
-            adjustedLine[0] += 1; adjustedLine[1] += 109;
-            adjustedLine[2] += 1; adjustedLine[3] += 109;
+            adjustedLine[0] += roiRect.x; adjustedLine[1] += roiRect.y;
+            adjustedLine[2] += roiRect.x; adjustedLine[3] += roiRect.y;
             
             line(finalImage, Point(adjustedLine[0], adjustedLine[1]),
                  Point(adjustedLine[2], adjustedLine[3]), Scalar(255), 3, LINE_AA);
@@ -122,11 +155,11 @@ int main(int argc, char** argv) {
         }
     }
     
-    imshow("8. Hough Lines", houghResult);
+    imshow("10. Hough Lines", houghResult);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    imshow("9. Final Result", finalImage);
+    imshow("11. Final Result", finalImage);
     cout << "按ESC退出" << endl;
     waitKey(0);
     

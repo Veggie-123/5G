@@ -29,7 +29,7 @@ const float yuntai_LR_pwm_duty_cycle_unlock = 63.0; //大左小右
 const int yuntai_UD_pin = 23; // 存储云台引脚号
 const float yuntai_UD_pwm_range = 1000.0; // 存储云台PWM范围
 const float yuntai_UD_pwm_frequency = 50.0; // 存储云台PWM频率
-const float yuntai_UD_pwm_duty_cycle_unlock = 65.0; //大上下小
+const float yuntai_UD_pwm_duty_cycle_unlock = 58.0; //大上下小
 
 int parkchose = 2; // 停车车库检测结果
 

@@ -6,9 +6,9 @@
 #include <unistd.h> // Unix标准库
 
 #include <opencv2/opencv.hpp> // OpenCV主头文件
-#include <opencv4/opencv2/core/core.hpp> // OpenCV核心功能
-#include <opencv4/opencv2/highgui.hpp> // OpenCV高层GUI功能
-#include <opencv4/opencv2/imgproc/imgproc_c.h> // OpenCV图像处理功能
+#include <opencv2/core/core.hpp> // OpenCV核心功能
+#include <opencv2/highgui.hpp> // OpenCV高层GUI功能
+#include <opencv2/imgproc/imgproc_c.h> // OpenCV图像处理功能
 
 #include <string> // 字符串库
 #include <pigpio.h> // GPIO控制库
@@ -110,7 +110,7 @@ const int BLUE_ROI_HEIGHT = 100; // ROI高度
 const double BLUE_AREA_VALID = 2000.0; // 有效面积阈值
 
 // 蓝色挡板移开检测参数
-const double BLUE_REMOVE_AREA_MIN = 100.0; // 移开检测的最小面积阈值（过滤小噪点）
+const double BLUE_REMOVE_AREA_MIN = 500.0; // 移开检测的最小面积阈值（过滤小噪点）
 
 //---------------斑马线检测参数（可调节）------------------------------------------
 // HSV白色范围
