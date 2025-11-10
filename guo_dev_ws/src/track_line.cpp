@@ -1,6 +1,3 @@
-// Last update: 2024/12/5 
-// 安徽芜湖----国赛----------
-
 #include <iostream> // 标准输入输出流库
 #include <cstdlib> // 标准库
 #include <unistd.h> // Unix标准库
@@ -70,7 +67,7 @@ const float motor_pwm_duty_cycle_unlock = 11400.0; // 存储电机PWM占空比�
 
 
 //---------------------------------------------------------------------------------------------------
-float motor_pwm_mid = 11400.0; // 存储电机解锁值
+float motor_pwm_mid = motor_pwm_duty_cycle_unlock; // 存储电机解锁值
 //---------------------------------------------------------------------------------------------------
 
 const int yuntai_LR_pin = 22; // 存储云台引脚号
@@ -864,7 +861,6 @@ int main(void)
 
     auto lastDebugRefresh = std::chrono::steady_clock::now();
     cv::Mat lastDebugOverlay;
-    double fpsFiltered = 0.0;
 
     while (capture.read(frame)){
 
@@ -886,7 +882,7 @@ int main(void)
             }
 
         }
-        else // 如果开始标志不为1
+        else // 如果开始标志为1
         {
 
             number++; // 计数器加1
@@ -932,15 +928,7 @@ int main(void)
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> elapsed = end - start;
         double instantFps = (elapsed.count() > 0 ? 1.0 / elapsed.count() : 0.0);
-        if (fpsFiltered == 0.0)
-        {
-            fpsFiltered = instantFps;
-        }
-        else
-        {
-            fpsFiltered = fpsFiltered * 0.85 + instantFps * 0.15;
-        }
-        std::cout << "FPS: " << std::fixed << std::setprecision(1) << fpsFiltered << std::endl;
+        std::cout << "FPS: " << std::fixed << std::setprecision(1) << instantFps << std::endl;
 
     }
 }
