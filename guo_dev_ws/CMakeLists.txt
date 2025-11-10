@@ -11,6 +11,7 @@ include_directories(
     ${PROTO_PB_DIR} 
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/inc
     ${CMAKE_SOURCE_DIR}/include/MNN
     ${OpenCV_INCLUDE_DIRS}
     # 添加 pigpio 头文件可能的路径

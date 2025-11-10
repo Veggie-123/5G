@@ -15,6 +15,7 @@
 #include <thread> // 线程库
 #include <vector> // 向量容器库
 #include <chrono> // 时间库
+#include <iomanip> // 格式化输出
 
 using namespace std; // 使用标准命名空间
 using namespace cv; // 使用OpenCV命名空间
@@ -142,7 +143,8 @@ const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 //---------------性能优化选项-------------------------------------------------
 // 如果树莓派性能不足，可以设置为1以使用更快的处理方式（可能会略微降低效果）
 const int MIN_COMPONENT_AREA = 400;
-const bool SHOW_SOBEL_DEBUG = false;
+const bool SHOW_SOBEL_DEBUG = true;
+const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
 
 // 定义舵机和电机PWM初始化函数
 void servo_motor_pwmInit(void) 
@@ -180,24 +182,32 @@ void servo_motor_pwmInit(void)
 //------------------------------------------------------------------------------------------------------------
 cv::Mat undistort(const cv::Mat &frame) 
 {
-    double k1 = 0.0439656098483248; // 畸变系数k1
-    double k2 = -0.0420991522460257; // 畸变系数k2
-    double p1 = 0.0; // 畸变系数p1
-    double p2 = 0.0; // 畸变系数p2
-    double k3 = 0.0; // 畸变系数k3
+    static cv::Mat mapx, mapy; // 映射矩阵
+    static cv::Size cachedSize;
+    static bool initialized = false;
 
-    // 相机内参矩阵
-    cv::Mat K = (cv::Mat_<double>(3, 3) << 176.842468665091, 0.0, 159.705914860981,
-                 0.0, 176.990910857055, 120.557953465790,
-                 0.0, 0.0, 1.0);
+    if (!initialized || cachedSize != frame.size())
+    {
+        const double k1 = 0.0439656098483248; // 畸变系数k1
+        const double k2 = -0.0420991522460257; // 畸变系数k2
+        const double p1 = 0.0; // 畸变系数p1
+        const double p2 = 0.0; // 畸变系数p2
+        const double k3 = 0.0; // 畸变系数k3
 
-    // 畸变系数矩阵
-    cv::Mat D = (cv::Mat_<double>(1, 5) << k1, k2, p1, p2, k3);
-    cv::Mat mapx, mapy; // 映射矩阵
+        // 相机内参矩阵
+        cv::Mat K = (cv::Mat_<double>(3, 3) << 176.842468665091, 0.0, 159.705914860981,
+                     0.0, 176.990910857055, 120.557953465790,
+                     0.0, 0.0, 1.0);
+
+        // 畸变系数矩阵
+        cv::Mat D = (cv::Mat_<double>(1, 5) << k1, k2, p1, p2, k3);
+        cv::initUndistortRectifyMap(K, D, cv::Mat(), K, frame.size(), CV_32FC1, mapx, mapy);
+        cachedSize = frame.size();
+        initialized = true;
+    }
+
     cv::Mat undistortedFrame; // 去畸变后的图像帧
 
-    // 初始化去畸变映射
-    cv::initUndistortRectifyMap(K, D, cv::Mat(), K, frame.size(), CV_32FC1, mapx, mapy);
     // 应用映射，得到去畸变后的图像
     cv::remap(frame, undistortedFrame, mapx, mapy, cv::INTER_LINEAR);
 
@@ -265,29 +275,30 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
     }
 
     const cv::Rect roiRect(1, 109, 318, 46); // 巡线ROI区域
+    cv::Mat roi = resizedFrame(roiRect); // 直接使用ROI视图
 
-    cv::Mat grayImage;
-    cv::cvtColor(resizedFrame, grayImage, cv::COLOR_BGR2GRAY); // 整帧灰度化
+    cv::Mat grayRoi;
+    cv::cvtColor(roi, grayRoi, cv::COLOR_BGR2GRAY); // ROI灰度化
 
     int kernelSize = 5;
-    cv::Mat blurredImage;
-    cv::blur(grayImage, blurredImage, cv::Size(kernelSize, kernelSize)); // 整帧均值滤波降噪
+    cv::Mat blurredRoi;
+    cv::blur(grayRoi, blurredRoi, cv::Size(kernelSize, kernelSize)); // ROI均值滤波降噪
 
     cv::Mat sobelX, sobelY;
-    cv::Sobel(blurredImage, sobelX, CV_64F, 1, 0, 3); // X方向梯度
-    cv::Sobel(blurredImage, sobelY, CV_64F, 0, 1, 3); // Y方向梯度
+    cv::Sobel(blurredRoi, sobelX, CV_64F, 1, 0, 3); // X方向梯度
+    cv::Sobel(blurredRoi, sobelY, CV_64F, 0, 1, 3); // Y方向梯度
     cv::Mat gradientMagnitude = cv::abs(sobelY) + 0.5 * cv::abs(sobelX); // 组合梯度更偏向纵向
     cv::Mat gradientMagnitude8U;
     cv::convertScaleAbs(gradientMagnitude, gradientMagnitude8U); // 转为8位方便阈值
 
-    cv::Mat hsvImage;
-    cv::cvtColor(resizedFrame, hsvImage, cv::COLOR_BGR2HSV); // 整帧HSV分离亮度信息
-    std::vector<cv::Mat> hsvChannels;
-    cv::split(hsvImage, hsvChannels); // 拆分H/S/V
+    cv::Mat hsvRoi;
+    cv::cvtColor(roi, hsvRoi, cv::COLOR_BGR2HSV); // ROI HSV分离亮度信息
+    cv::Mat vChannel;
+    cv::extractChannel(hsvRoi, vChannel, 2); // 仅提取V通道
 
     cv::Mat claheOutput;
     cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(4, 4)); // 自适应直方图均衡
-    clahe->apply(hsvChannels[2], claheOutput);                       // 仅对V通道增强
+    clahe->apply(vChannel, claheOutput);                       // 仅对V通道增强
     cv::GaussianBlur(claheOutput, claheOutput, cv::Size(5, 5), 0);   // 平滑提升稳定性
 
     cv::Mat adaptiveMask;
@@ -326,8 +337,7 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
     morphImage = filteredMorph;
 
     std::vector<cv::Vec4i> lines;
-    cv::Mat morphRoi = morphImage(roiRect).clone();
-    cv::HoughLinesP(morphRoi, lines, 1, CV_PI / 180, 20, 15, 8);
+    cv::HoughLinesP(morphImage, lines, 1, CV_PI / 180, 20, 15, 8);
 
     cv::Mat finalImage = cv::Mat::zeros(targetSize, CV_8U);
     cv::Mat overlayImage;
@@ -696,7 +706,7 @@ float servo_pd(int target) { // 赛道巡线控制
 
     int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
-    cout << " PIDX: " << pidx << endl;  
+    // cout << " PIDX: " << pidx << endl;  
 
     float kp = 1.0; // 比例系数
     float kd = 2.0; // 微分系数
@@ -786,26 +796,26 @@ void motor_servo_contral()
         if (banma == 0 && flag_banma == 0 ){
             // 确保 mid 向量有足够数据（避免越界）
             if (mid.size() < 26) {
-                cerr << "mid 向量数据不足，使用默认角度" << endl;
+                // cerr << "mid 向量数据不足，使用默认角度" << endl;
                 servo_pwm_now = servo_pwm_mid;
             } else {
                 servo_pwm_now = servo_pd(160); 
-                cerr << "找到有效线" << endl;
+                // cerr << "找到有效线" << endl;
             }
             if(number < 10){
                 gpioPWM(motor_pin, motor_pwm_mid + 1800); 
             }else if (number < 500){
                 gpioPWM(motor_pin, motor_pwm_mid + 1500); 
-                cout << "巡线-----------------------弯道1 舵机PWM:  " << servo_pwm_now << endl;
+                // cout << "巡线-----------------------弯道1 舵机PWM:  " << servo_pwm_now << endl;
             }else if (number < 550){
                 gpioPWM(motor_pin, motor_pwm_mid + 1500); 
-                cout << "巡线-----------------------弯道2 舵机PWM:  " << servo_pwm_now << endl;
+                // cout << "巡线-----------------------弯道2 舵机PWM:  " << servo_pwm_now << endl;
             }else if (number < 600){
                 gpioPWM(motor_pin, motor_pwm_mid + 1500); 
-                cout << "巡线-----------------------弯道3 舵机PWM:  " << servo_pwm_now << endl;
+                // cout << "巡线-----------------------弯道3 舵机PWM:  " << servo_pwm_now << endl;
             }else{
                 gpioPWM(motor_pin, motor_pwm_mid + 1500); 
-                cout << "巡线-----------------------弯道4 舵机PWM:  " << servo_pwm_now << endl;
+                // cout << "巡线-----------------------弯道4 舵机PWM:  " << servo_pwm_now << endl;
             }
             gpioPWM(servo_pin, servo_pwm_now);
         }
@@ -852,6 +862,10 @@ int main(void)
     cout << "Frame Height: " << capture.get(cv::CAP_PROP_FRAME_HEIGHT) << endl;
     //---------------------------------------------------
 
+    auto lastDebugRefresh = std::chrono::steady_clock::now();
+    cv::Mat lastDebugOverlay;
+    double fpsFiltered = 0.0;
+
     while (capture.read(frame)){
 
         frame = undistort(frame); // 对帧进行去畸变处理
@@ -879,11 +893,28 @@ int main(void)
 
             if ( banma == 0 ){
 
+                const auto now = std::chrono::steady_clock::now();
+                const bool shouldRefreshDebug = SHOW_SOBEL_DEBUG &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDebugRefresh).count() >= SOBEL_DEBUG_REFRESH_INTERVAL_MS;
+
                 cv::Mat debugOverlay;
-                bin_image = ImageSobel(frame, SHOW_SOBEL_DEBUG ? &debugOverlay : nullptr); // 图像预处理
-                if (SHOW_SOBEL_DEBUG && !debugOverlay.empty())
+                cv::Mat *debugPtr = (SHOW_SOBEL_DEBUG && shouldRefreshDebug) ? &debugOverlay : nullptr;
+                bin_image = ImageSobel(frame, debugPtr); // 图像预处理
+
+                if (SHOW_SOBEL_DEBUG && shouldRefreshDebug)
                 {
-                    cv::imshow("TrackLine Overlay", debugOverlay);
+                    if (!debugOverlay.empty())
+                    {
+                        lastDebugOverlay = debugOverlay;
+                    }
+                    if (!lastDebugOverlay.empty())
+                    {
+                        cv::imshow("TrackLine Overlay", lastDebugOverlay);
+                    }
+                    lastDebugRefresh = now;
+                }
+                if (SHOW_SOBEL_DEBUG)
+                {
                     cv::waitKey(1);
                 }
                 Tracking(bin_image); // 进行巡线识别
@@ -900,7 +931,16 @@ int main(void)
 
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double> elapsed = end - start;
-        std::cout << "Time per frame: " << elapsed.count() << " s    FPS: " << (elapsed.count() > 0 ? 1.0 / elapsed.count() : 0.0) << "    number: " << number << std::endl;
+        double instantFps = (elapsed.count() > 0 ? 1.0 / elapsed.count() : 0.0);
+        if (fpsFiltered == 0.0)
+        {
+            fpsFiltered = instantFps;
+        }
+        else
+        {
+            fpsFiltered = fpsFiltered * 0.85 + instantFps * 0.15;
+        }
+        std::cout << "FPS: " << std::fixed << std::setprecision(1) << fpsFiltered << std::endl;
 
     }
 }
