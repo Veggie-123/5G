@@ -24,6 +24,14 @@ const int MOTOR_SPEED_DELTA_CRUISE = 1500; // 常规巡航速度增量
 const int MOTOR_SPEED_DELTA_AVOID = 1300;  // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_PARK = 1300;   // 车库阶段速度增量
 
+//---------------调试选项-------------------------------------------------
+const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
+const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
+
+//---------------性能统计---------------------------------------------------
+int number = 0; // 已处理帧计数
+bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
+
 //------------有关的全局变量定义------------------------------------------------------------------------------------------
 
 std::vector<DetectObject> result; // 存储FastestDet检测结果
@@ -54,6 +62,9 @@ FastestDet* fastestdet_ab = nullptr;
 Mat frame; // 存储视频帧
 Mat bin_image; // 存储二值化图像--Sobel检测后图像
 
+// 图像处理参数
+const int MIN_COMPONENT_AREA = 400; // 连通区域最小面积阈值（用于过滤噪声）
+
 //-----------------巡线相关-----------------------------------------------
 std::vector<cv::Point> mid; // 存储中线
 std::vector<cv::Point> left_line; // 存储左线条
@@ -73,7 +84,8 @@ int fache_sign = 0; // 标记发车信号
 int banma = 0; // 斑马线检测结果
 
 //----------------变道相关---------------------------------------------------
-int changeroad = 1; // 变道检测结果
+int changeroad = 0; // 变道检测结果 (0=未识别, 1=左转, 2=右转)
+bool has_detected_turn_sign = false; // 是否已成功识别到转向标识
 
 //----------------避障相关---------------------------------------------------
 int bz_heighest = 0; // 避障高度
@@ -184,13 +196,6 @@ const int BANMA_MIN_COUNT = 6;  // 判定为斑马线需要的最少白色矩形
 // 形态学处理参数
 const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 
-//---------------性能优化选项-------------------------------------------------
-// 如果树莓派性能不足，可以设置为1以使用更快的处理方式（可能会略微降低效果）
-const int MIN_COMPONENT_AREA = 400;
-const bool SHOW_SOBEL_DEBUG = false;
-const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
-//---------------性能统计---------------------------------------------------
-int number = 0; // 已处理帧计数
 
 //--------------------------------------------------------------------------
 
@@ -1027,11 +1032,18 @@ void motor_servo_contral()
 
 //-----------------------------------------------------------------------------------主函数-----------------------------------------------
 // 功能: 主循环，完成相机初始化、状态机执行与控制闭环
-int main(void)
+int main(int argc, char* argv[])
 {
-    cout << "===========================================\n";
-    cout << "智能小车系统启动中...\n";
-    cout << "===========================================\n";
+    // 解析命令行参数
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--no-fps") {
+            SHOW_FPS = false;
+            cout << "[参数] FPS显示已禁用" << endl;
+        } else if (std::string(argv[i]) == "--show-fps") {
+            SHOW_FPS = true;
+            cout << "[参数] FPS显示已启用" << endl;
+        }
+    }
 
     // 初始化检测模型
     cout << "[初始化] 加载障碍物检测模型..." << endl;
@@ -1159,16 +1171,24 @@ int main(void)
                     result = fastestdet_lr->detect(frame);
                     if (!result.empty()) {
                         changeroad = result[0].label + 1; // label 0 -> left (1), label 1 -> right (2)
+                        has_detected_turn_sign = true; // 标记已成功识别
                         cout << "[流程] 检测到转向标识：" << (changeroad == 1 ? "左转" : "右转") << endl;
                     }
                 } else {
-                    // 3秒结束，执行转向
-                    is_stopping_at_zebra = false;
-                    cout << "[流程] 停车时间结束，执行" << (changeroad == 1 ? "左转" : "右转") << "动作" << endl;
-                    motor_changeroad(); // 执行转向动作
-                    flag_turn_done = 1; // 标记转向完成
-                    is_parking_phase = true; // 进入寻找车库阶段
-                    cout << "[流程] 转向完成，开始寻找并识别A/B车库" << endl;
+                    // 3秒结束，检查是否已识别到转向标识
+                    if (has_detected_turn_sign) {
+                        // 已识别到转向标识，执行转向
+                        is_stopping_at_zebra = false;
+                        cout << "[流程] 停车时间结束，执行" << (changeroad == 1 ? "左转" : "右转") << "动作" << endl;
+                        motor_changeroad(); // 执行转向动作
+                        flag_turn_done = 1; // 标记转向完成
+                        is_parking_phase = true; // 进入寻找车库阶段
+                        cout << "[流程] 转向完成，开始寻找并识别A/B车库" << endl;
+                    } else {
+                        // 未识别到转向标识，继续等待并检测
+                        cout << "[警告] 未检测到转向标识，继续等待识别..." << endl;
+                        zebra_stop_start_time = std::chrono::steady_clock::now(); // 重置计时器，继续等待
+                    }
                 }
             }
             else if (is_parking_phase)
@@ -1259,6 +1279,8 @@ int main(void)
                     banma = banma_get(frame);
                     if (banma == 1) {
                         is_stopping_at_zebra = true; //切换到停车状态
+                        has_detected_turn_sign = false; // 重置转向标识检测标志
+                        changeroad = 0; // 重置转向方向
                         zebra_stop_start_time = std::chrono::steady_clock::now();
                         cout << "[流程] 避障结束，检测到斑马线，准备停车识别" << endl;
                         banma_stop(); // 执行停车
@@ -1308,10 +1330,11 @@ int main(void)
         std::chrono::duration<double> elapsed = end - start;
         double instantFps = (elapsed.count() > 0 ? 1.0 / elapsed.count() : 0.0);
 
-        // 输出处理一帧所需的时间和帧率
-        // std::cout << "Time per frame: " << elapsed.count() << " seconds" << std::endl;
-        std::cout << "[性能] 当前FPS: " << std::fixed << std::setprecision(1) << instantFps
-                  << " | 已处理帧数: " << number << std::endl;
+        // 根据SHOW_FPS设置决定是否输出FPS信息
+        if (SHOW_FPS) {
+            std::cout << "[性能] 当前FPS: " << std::fixed << std::setprecision(1) << instantFps
+                      << " | 已处理帧数: " << number << std::endl;
+        }
         
         } catch (const cv::Exception& e) {
             cerr << "[错误] OpenCV异常: " << e.what() << endl;
