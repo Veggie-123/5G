@@ -14,7 +14,7 @@
 #include <chrono> // 时间库
 #include <iomanip> // 格式化输出
 
-#include "Yolo.h" // Yolo库
+#include "fastestdet.hpp" // FastestDet库
 
 using namespace std; // 使用标准命名空间
 using namespace cv; // 使用OpenCV命名空间
@@ -26,25 +26,29 @@ const int MOTOR_SPEED_DELTA_PARK = 1300;   // 车库阶段速度增量
 
 //------------有关的全局变量定义------------------------------------------------------------------------------------------
 
-std::vector<BoxInfo> result; // 存储Yolo检测结果
-std::vector<BoxInfo_v5lite> result_ab; // 存储Yolo检测结果
+std::vector<DetectObject> result; // 存储FastestDet检测结果
+std::vector<DetectObject> result_ab; // 存储FastestDet检测结果
 
-std::string model_name_obs = "/home/pi/model/obs_fp32.mnn";
+// 模型路径配置
+std::string model_param_obs = "models/obs.param";
+std::string model_bin_obs = "models/obs.bin";
 int num_classes_obs = 1;
 std::vector<std::string> labels_obs{"zhuitong"};
-yolo_fv2_mnn yolo_obs(0.6, 0.4, model_name_obs, num_classes_obs, labels_obs);
 
-std::string model_name_lr = "/home/pi/model/lr_fp32.mnn";
+std::string model_param_lr = "models/lr.param";
+std::string model_bin_lr = "models/lr.bin";
 int num_classes_lr = 2;
 std::vector<std::string> labels_lr{"left", "right"};
-yolo_fv2_mnn yolo_lr(0.5, 0.5, model_name_lr, num_classes_lr, labels_lr);
 
-std::string model_name_ab = "/home/pi/model/ab_fp32_fv2.mnn";
+std::string model_param_ab = "models/ab.param";
+std::string model_bin_ab = "models/ab.bin";
 int num_classes_ab = 2;
 std::vector<std::string> labels_ab{"A", "B"};
-yolo_fv2_mnn yolo_ab(0.5, 0.5, model_name_ab, num_classes_ab, labels_ab);
 
-yolo_fv2_mnn yolo_ab_lite(0.5);
+// 模型指针（延迟初始化，避免全局构造函数问题）
+FastestDet* fastestdet_obs = nullptr;
+FastestDet* fastestdet_lr = nullptr;
+FastestDet* fastestdet_ab = nullptr;
 
 //-----------------图像相关----------------------------------------------
 Mat frame; // 存储视频帧
@@ -183,7 +187,7 @@ const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
 //---------------性能优化选项-------------------------------------------------
 // 如果树莓派性能不足，可以设置为1以使用更快的处理方式（可能会略微降低效果）
 const int MIN_COMPONENT_AREA = 400;
-const bool SHOW_SOBEL_DEBUG = true;
+const bool SHOW_SOBEL_DEBUG = false;
 const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
 //---------------性能统计---------------------------------------------------
 int number = 0; // 已处理帧计数
@@ -430,6 +434,12 @@ void Tracking(cv::Mat &dilated_image)
         return;
     }
 
+    // 检查图像尺寸
+    if (dilated_image.rows < 154 || dilated_image.cols < 319) {
+        std::cerr << "[错误] Tracking: 图像尺寸不足 (" << dilated_image.cols << "x" << dilated_image.rows << ")，需要至少 319x154" << std::endl;
+        return;
+    }
+
     // 如果上一次有有效数据，使用上一次的中点作为起始点，否则使用默认值
     int begin = 160; // 初始化起始位置
     if (!last_mid.empty() && last_mid.size() >= 20) 
@@ -450,6 +460,9 @@ void Tracking(cv::Mat &dilated_image)
     // 逐行搜索，从第153行到第110行
     for (int i = 153; i >= 110; --i) 
     {
+        // 确保行索引在有效范围内
+        if (i >= dilated_image.rows) continue;
+        
         int left = begin;  // 左侧搜索起点
         int right = begin; // 右侧搜索起点
         bool left_found = false; // 标记是否找到左线
@@ -458,6 +471,12 @@ void Tracking(cv::Mat &dilated_image)
         // 搜索左线
         while (left > 1) 
         {
+            // 边界检查
+            if (left + 1 >= dilated_image.cols) {
+                --left;
+                continue;
+            }
+            
             if (dilated_image.at<uchar>(i, left) == 255 &&
                 dilated_image.at<uchar>(i, left + 1) == 255) 
             {
@@ -473,8 +492,14 @@ void Tracking(cv::Mat &dilated_image)
         }
 
         // 搜索右线
-        while (right < 318) 
+        while (right < std::min(318, dilated_image.cols - 1)) 
         {
+            // 边界检查
+            if (right < 2) {
+                ++right;
+                continue;
+            }
+            
             if (dilated_image.at<uchar>(i, right) == 255 &&
                 dilated_image.at<uchar>(i, right - 2) == 255) 
             {
@@ -486,7 +511,7 @@ void Tracking(cv::Mat &dilated_image)
         }
         if (!right_found) 
         {
-            right_line.emplace_back(318, i); // 右线未找到，默认记录最右侧点
+            right_line.emplace_back(std::min(318, dilated_image.cols - 1), i); // 右线未找到，默认记录最右侧点
         }
 
         // 计算中点
@@ -586,7 +611,7 @@ void Tracking_bz(cv::Mat &dilated_image)
 
 // 比较两个轮廓的面积
 // 功能: 轮廓面积比较（用于排序，返回面积更大的在前）
-bool Contour_Area(vector<Point> contour1, vector<Point> contour2)
+bool Contour_Area(const vector<Point>& contour1, const vector<Point>& contour2)
 {
     return contourArea(contour1) > contourArea(contour2); // 返回轮廓1是否大于轮廓2
 }
@@ -595,6 +620,11 @@ bool Contour_Area(vector<Point> contour1, vector<Point> contour2)
 // 功能: 在限定ROI内通过HSV阈值查找蓝色挡板，带连续帧计数确认
 void blue_card_find(void)  // 输入为mask图像
 {   
+    if (frame.empty()) {
+        cerr << "[错误] blue_card_find: frame为空" << endl;
+        return;
+    }
+
     Mat change_frame; // 存储颜色空间转换后的图像
     cvtColor(frame, change_frame, COLOR_BGR2HSV); // 转换颜色空间
 
@@ -607,11 +637,24 @@ void blue_card_find(void)  // 输入为mask图像
 
     // 限制检测区域到画面中央区域，减少边缘干扰
     cv::Rect roi_blue(BLUE_ROI_X, BLUE_ROI_Y, BLUE_ROI_WIDTH, BLUE_ROI_HEIGHT);
-    Mat mask_roi = mask(roi_blue);
+    
+    // 边界检查
+    if (roi_blue.x + roi_blue.width > mask.cols || roi_blue.y + roi_blue.height > mask.rows) {
+        cerr << "[错误] blue_card_find: ROI超出边界" << endl;
+        return;
+    }
+    
+    Mat mask_roi = mask(roi_blue).clone(); // 克隆以避免findContours修改原图
 
     vector<vector<Point>> contours; // 存储轮廓的向量
     vector<Vec4i> hierarcy; // 存储层次结构的向量
-    findContours(mask_roi, contours, hierarcy, RETR_EXTERNAL, CHAIN_APPROX_NONE); // 查找轮廓
+    
+    try {
+        findContours(mask_roi, contours, hierarcy, RETR_EXTERNAL, CHAIN_APPROX_NONE); // 查找轮廓
+    } catch (const cv::Exception& e) {
+        cerr << "[错误] blue_card_find: findContours失败: " << e.what() << endl;
+        return;
+    }
     
     if (contours.size() > 0) // 如果找到轮廓
     {
@@ -670,6 +713,11 @@ void blue_card_remove(void) // 输入为mask图像
 {
     cout << "进入 蓝色挡板移开 进程！" << endl; // 输出进入移除蓝色挡板的过程
 
+    if (frame.empty()) {
+        cerr << "[错误] blue_card_remove: frame为空" << endl;
+        return;
+    }
+
     Mat change_frame; // 存储颜色空间转换后的图像
     cvtColor(frame, change_frame, COLOR_BGR2HSV); // 转换颜色空间
 
@@ -682,11 +730,24 @@ void blue_card_remove(void) // 输入为mask图像
 
     // 使用与blue_card_find相同的ROI区域进行裁剪
     cv::Rect roi_blue(BLUE_ROI_X, BLUE_ROI_Y, BLUE_ROI_WIDTH, BLUE_ROI_HEIGHT);
-    Mat mask_roi = mask(roi_blue);
+    
+    // 边界检查
+    if (roi_blue.x + roi_blue.width > mask.cols || roi_blue.y + roi_blue.height > mask.rows) {
+        cerr << "[错误] blue_card_remove: ROI超出边界" << endl;
+        return;
+    }
+    
+    Mat mask_roi = mask(roi_blue).clone(); // 克隆以避免findContours修改原图
 
     vector<vector<Point>> contours; // 定义轮廓向量
     vector<Vec4i> hierarcy; // 定义层次结构向量
-    findContours(mask_roi, contours, hierarcy, RETR_EXTERNAL, CHAIN_APPROX_NONE); // 查找轮廓
+    
+    try {
+        findContours(mask_roi, contours, hierarcy, RETR_EXTERNAL, CHAIN_APPROX_NONE); // 查找轮廓
+    } catch (const cv::Exception& e) {
+        cerr << "[错误] blue_card_remove: findContours失败: " << e.what() << endl;
+        return;
+    }
 
     // 过滤出"有效蓝色轮廓"（只检查面积，位置已由ROI限制）
     vector<vector<Point>> validContours;
@@ -780,9 +841,13 @@ int banma_get(cv::Mat &frame) {
 // 功能: 常规巡线PD控制器，基于中线偏差计算舵机PWM
 float servo_pd(int target) { // 赛道巡线控制
 
-    int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
+    // 安全检查：确保mid向量有足够的元素
+    if (mid.size() < 26) {
+        cerr << "[警告] servo_pd: mid向量元素不足 (" << mid.size() << " < 26)，返回中值" << endl;
+        return servo_pwm_mid;
+    }
 
-    cout << "[PID调试] 常规巡线中点位置：" << pidx << endl;  
+    int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
     float kp = 1.0; // 比例系数
     float kd = 2.0; // 微分系数
@@ -809,9 +874,13 @@ float servo_pd(int target) { // 赛道巡线控制
 // 功能: 避障巡线PD控制器，权重更大，响应更快
 float servo_pd_bz(int target) { // 避障巡线控制
 
-    int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
+    // 安全检查：确保mid_bz向量不为空
+    if (mid_bz.empty()) {
+        cerr << "[警告] servo_pd_bz: mid_bz向量为空，返回中值" << endl;
+        return servo_pwm_mid;
+    }
 
-    cout << "[PID调试] 避障中线位置：" << pidx << endl;    
+    int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
 
     // float kp = 1.5; // 比例系数
     float kp = 3.0; // 比例系数
@@ -838,8 +907,6 @@ float servo_pd_bz(int target) { // 避障巡线控制
 float servo_pd_AB(int target) { // 避障巡线控制
 
     int pidx = park_mid; // 计算中点的x坐标
-
-    cout << "[PID调试] 停车阶段中点位置：" << pidx << endl;                   
 
     float kp = 3.0; // 比例系数
     float kd = 3.0; // 微分系数
@@ -935,6 +1002,11 @@ void motor_servo_contral()
         return;
     }
 
+    // 安全检查：如果还没发车，不执行控制
+    if (fache_sign == 0) {
+        return;
+    }
+
     if (is_parking_phase)
     {
         // 状态4: 寻找并进入车库
@@ -957,6 +1029,44 @@ void motor_servo_contral()
 // 功能: 主循环，完成相机初始化、状态机执行与控制闭环
 int main(void)
 {
+    cout << "===========================================\n";
+    cout << "智能小车系统启动中...\n";
+    cout << "===========================================\n";
+
+    // 初始化检测模型
+    cout << "[初始化] 加载障碍物检测模型..." << endl;
+    try {
+        fastestdet_obs = new FastestDet(model_param_obs, model_bin_obs, num_classes_obs, labels_obs, 352, 0.6f, 0.4f, 4, false);
+        cout << "[初始化] 障碍物检测模型加载成功!" << endl;
+    } catch (const std::exception& e) {
+        cerr << "[错误] 障碍物检测模型加载失败: " << e.what() << endl;
+        return -1;
+    }
+
+    cout << "[初始化] 加载转向标志检测模型..." << endl;
+    try {
+        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.5f, 0.5f, 4, false);
+        cout << "[初始化] 转向标志检测模型加载成功!" << endl;
+    } catch (const std::exception& e) {
+        cerr << "[错误] 转向标志检测模型加载失败: " << e.what() << endl;
+        delete fastestdet_obs;
+        return -1;
+    }
+
+    cout << "[初始化] 加载车库检测模型..." << endl;
+    try {
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.5f, 0.5f, 4, false);
+        cout << "[初始化] 车库检测模型加载成功!" << endl;
+    } catch (const std::exception& e) {
+        cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
+        delete fastestdet_obs;
+        delete fastestdet_lr;
+        return -1;
+    }
+
+    cout << "[初始化] 所有模型加载完成!\n";
+    cout << "===========================================\n";
+
     gpioTerminate();           // 终止GPIO操作
     servo_motor_pwmInit();     // 初始化舵机PWM
 
@@ -989,37 +1099,45 @@ int main(void)
 
     while (capture.read(frame)){
 
-        // 1. 图像预处理：畸变校正
-        frame = undistort(frame);
-
-        // 记录单帧处理起始时间
-        auto start = std::chrono::high_resolution_clock::now();
-        
-        // 2. 发车逻辑：检测蓝色挡板
-        if (fache_sign == 0) // 发车标志为0，说明还未发车
-        {
-            if (find_first == 0) // 若还未找到过挡板
-            {
-                blue_card_find(); // 持续寻找蓝色挡板
-            }
-            else // 若已找到过挡板，则进入移开检测阶段
-            {
-                blue_card_remove(); // 检测蓝色挡板是否已移开
-            }
-
+        // 安全检查：确保frame有效
+        if (frame.empty()) {
+            cerr << "[错误] 读取到空帧，跳过处理" << endl;
+            continue;
         }
-        else // 发车标志为1，车辆启动
-        {
-            number++; // 帧计数器累加
 
-            // 1. 图像处理与车道线识别
-            const auto now = std::chrono::steady_clock::now();
-            const bool shouldRefreshDebug = SHOW_SOBEL_DEBUG &&
-                std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDebugRefresh).count() >= SOBEL_DEBUG_REFRESH_INTERVAL_MS;
+        try {
+            // 1. 图像预处理：畸变校正
+            frame = undistort(frame);
 
-            cv::Mat debugOverlay;
-            cv::Mat* debugPtr = (SHOW_SOBEL_DEBUG && shouldRefreshDebug) ? &debugOverlay : nullptr;
-            bin_image = ImageSobel(frame, debugPtr); // Sobel等处理提取二值化图像
+            // 记录单帧处理起始时间
+            auto start = std::chrono::high_resolution_clock::now();
+            
+            // 2. 发车逻辑：检测蓝色挡板
+            if (fache_sign == 0) // 发车标志为0，说明还未发车
+            {
+                if (find_first == 0) // 若还未找到过挡板
+                {
+                    blue_card_find(); // 持续寻找蓝色挡板
+                }
+                else // 若已找到过挡板，则进入移开检测阶段
+                {
+                    blue_card_remove(); // 检测蓝色挡板是否已移开
+                }
+
+            }
+            else // 发车标志为1，车辆启动
+            {
+                number++; // 帧计数器累加
+
+                // 1. 图像处理与车道线识别
+                const auto now = std::chrono::steady_clock::now();
+                const bool shouldRefreshDebug = SHOW_SOBEL_DEBUG &&
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDebugRefresh).count() >= SOBEL_DEBUG_REFRESH_INTERVAL_MS;
+
+                cv::Mat debugOverlay;
+                cv::Mat* debugPtr = (SHOW_SOBEL_DEBUG && shouldRefreshDebug) ? &debugOverlay : nullptr;
+                
+                bin_image = ImageSobel(frame, debugPtr); // Sobel等处理提取二值化图像
 
             // (可选) 显示调试图像
             if (SHOW_SOBEL_DEBUG && shouldRefreshDebug)
@@ -1038,7 +1156,7 @@ int main(void)
                 if (elapsed < 3) {
                     // 3秒停车时间内，持续检测转向标志
                     result.clear();
-                    result = yolo_lr.detect(frame);
+                    result = fastestdet_lr->detect(frame);
                     if (!result.empty()) {
                         changeroad = result[0].label + 1; // label 0 -> left (1), label 1 -> right (2)
                         cout << "[流程] 检测到转向标识：" << (changeroad == 1 ? "左转" : "右转") << endl;
@@ -1059,25 +1177,28 @@ int main(void)
                 Tracking(bin_image); // 继续基础巡线以保持姿态
                 
                 result_ab.clear();
-                result_ab = yolo_ab_lite.detect(frame); // 使用yolo_ab_lite模型检测A/B
+                result_ab = fastestdet_ab->detect(frame); // 使用FastestDet模型检测A/B
 
-                BoxInfo_v5lite closest_box = {0, 0, 0, 0, 0.0, -1};
+                DetectObject closest_box = {cv::Rect_<float>(0, 0, 0, 0), -1, 0.0f};
                 
                 if (!result_ab.empty())
                 {
                     // 找到y2最大的那个检测框，即离得最近的
                     for(const auto& box : result_ab) {
-                        if (box.y2 > closest_box.y2) {
+                        float box_y2 = box.rect.y + box.rect.height;
+                        float closest_y2 = closest_box.rect.y + closest_box.rect.height;
+                        if (box_y2 > closest_y2) {
                             closest_box = box;
                         }
                     }
                     
+                    float closest_y2 = closest_box.rect.y + closest_box.rect.height;
                     latest_park_id = closest_box.label + 1; // 0 for A -> 1, 1 for B -> 2
                     cout << "[停车] 检测到最近车库: " << (latest_park_id == 1 ? "A" : "B") 
-                         << "，底部位置: " << closest_box.y2 << "/" << PARKING_Y_THRESHOLD << endl;
+                         << "，底部位置: " << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
 
                     // 检查是否达到入库阈值
-                    if (closest_box.y2 >= PARKING_Y_THRESHOLD) {
+                    if (closest_y2 >= PARKING_Y_THRESHOLD) {
                         cout << "[停车] 已达到入库阈值，执行入库 -> " << (latest_park_id == 1 ? "A" : "B") << endl;
                         gohead(latest_park_id);
                         is_parking_phase = false; // 避免重复执行
@@ -1090,14 +1211,18 @@ int main(void)
                 Tracking(bin_image); // 仍然需要常规巡线来获取左右边界参考
                 
                 bz_get = 0;
-                result = yolo_obs.detect(frame);
+                result = fastestdet_obs->detect(frame);
                 if (!result.empty()) {
-                    BoxInfo box = result.at(0);
-                    if (box.y2 < bz_y2) {
+                    DetectObject box = result.at(0);
+                    int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
+                    if (box_y2 < bz_y2) {
                         bz_get = 1;
-                        last_known_bz_xcenter = (box.x1 + box.x2) / 2;
-                        last_known_bz_bottom = box.y2;
-                        last_known_bz_heighest = box.y1;
+                        int box_x1 = static_cast<int>(box.rect.x);
+                        int box_x2 = static_cast<int>(box.rect.x + box.rect.width);
+                        int box_y1 = static_cast<int>(box.rect.y);
+                        last_known_bz_xcenter = (box_x1 + box_x2) / 2;
+                        last_known_bz_bottom = box_y2;
+                        last_known_bz_heighest = box_y1;
                         bz_disappear_count = 0; // 障碍物可见，重置消失计数
                     }
                 }
@@ -1143,19 +1268,23 @@ int main(void)
                 {
                     // 状态0: 默认状态，执行障碍物检测以启动避障
                     bz_get = 0;
-                    result = yolo_obs.detect(frame); 
+                    result = fastestdet_obs->detect(frame); 
 
                     if (result.size() > 0) { 
-                        BoxInfo box = result.at(0);
-                        if (box.y2 < bz_y2) { 
+                        DetectObject box = result.at(0);
+                        int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
+                        if (box_y2 < bz_y2) { 
                             bz_get = 1; 
                             is_in_avoidance = true; // 启动并锁定避障状态
                             cout << "[流程] 检测到障碍物，进入避障模式" << endl;
                             
                             // 记录障碍物的初始位置
-                            last_known_bz_xcenter = (box.x1 + box.x2) / 2;
-                            last_known_bz_bottom = box.y2;
-                            last_known_bz_heighest = box.y1;
+                            int box_x1 = static_cast<int>(box.rect.x);
+                            int box_x2 = static_cast<int>(box.rect.x + box.rect.width);
+                            int box_y1 = static_cast<int>(box.rect.y);
+                            last_known_bz_xcenter = (box_x1 + box_x2) / 2;
+                            last_known_bz_bottom = box_y2;
+                            last_known_bz_heighest = box_y1;
                             bz_heighest = last_known_bz_heighest;
 
                             // 立即执行第一次补线和避障巡线
@@ -1183,6 +1312,41 @@ int main(void)
         // std::cout << "Time per frame: " << elapsed.count() << " seconds" << std::endl;
         std::cout << "[性能] 当前FPS: " << std::fixed << std::setprecision(1) << instantFps
                   << " | 已处理帧数: " << number << std::endl;
+        
+        } catch (const cv::Exception& e) {
+            cerr << "[错误] OpenCV异常: " << e.what() << endl;
+            cerr << "  位置: " << e.file << ":" << e.line << endl;
+            // 继续下一帧
+            continue;
+        } catch (const std::exception& e) {
+            cerr << "[错误] 标准异常: " << e.what() << endl;
+            // 继续下一帧
+            continue;
+        } catch (...) {
+            cerr << "[错误] 未知异常，跳过当前帧" << endl;
+            // 继续下一帧
+            continue;
+        }
 
     }
+
+    // 清理资源
+    cout << "\n[清理] 释放模型资源..." << endl;
+    if (fastestdet_obs) {
+        delete fastestdet_obs;
+        fastestdet_obs = nullptr;
+    }
+    if (fastestdet_lr) {
+        delete fastestdet_lr;
+        fastestdet_lr = nullptr;
+    }
+    if (fastestdet_ab) {
+        delete fastestdet_ab;
+        fastestdet_ab = nullptr;
+    }
+    
+    gpioTerminate(); // 终止GPIO
+    cout << "[清理] 系统退出完成" << endl;
+    
+    return 0;
 }
