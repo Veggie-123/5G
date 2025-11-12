@@ -25,7 +25,7 @@ const int MOTOR_SPEED_DELTA_AVOID = 1300;  // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_PARK = 1300;   // 车库阶段速度增量
 
 //---------------调试选项-------------------------------------------------
-const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
+const bool SHOW_SOBEL_DEBUG = true; // 是否显示Sobel调试窗口
 const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
 
 //---------------性能统计---------------------------------------------------
@@ -888,7 +888,7 @@ float servo_pd_bz(int target) { // 避障巡线控制
     int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
 
     // float kp = 1.5; // 比例系数
-    float kp = 3.0; // 比例系数
+    float kp = 1.5; // 比例系数
     float kd = 3.0; // 微分系数
 
     error_first = target - pidx; // 计算误差
@@ -1057,7 +1057,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载转向标志检测模型..." << endl;
     try {
-        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.5f, 0.5f, 4, false);
+        fastestdet_lr = new FastestDet(model_param_lr, model_bin_lr, num_classes_lr, labels_lr, 352, 0.8f, 0.5f, 4, false);
         cout << "[初始化] 转向标志检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 转向标志检测模型加载失败: " << e.what() << endl;
@@ -1067,7 +1067,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.5f, 0.5f, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.8f, 0.5f, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
@@ -1284,6 +1284,7 @@ int main(int argc, char* argv[])
                         zebra_stop_start_time = std::chrono::steady_clock::now();
                         cout << "[流程] 避障结束，检测到斑马线，准备停车识别" << endl;
                         banma_stop(); // 执行停车
+                        system("mpg123 /home/pi/dev_ws/月半猫.mp3"); // 播放斑马线提示音
                     }
                 }
                 else
