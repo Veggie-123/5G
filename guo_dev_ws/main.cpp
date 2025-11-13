@@ -82,8 +82,16 @@ int fache_sign = 0; // 标记发车信号
 
 //---------------斑马线相关-------------------------------------------------
 int banma = 0; // 斑马线检测结果
+bool is_zebra_visible = false; // 新增：用于标记斑马线是否可见，以抑制循迹干扰
 
 //----------------变道相关---------------------------------------------------
+// 新增：闭环变道状态机
+enum LaneChangeState { LANE_CHANGE_NONE, START_TURN, CROSS_LANE, ALIGN_LANE };
+LaneChangeState g_lane_change_state = LANE_CHANGE_NONE;
+int g_lane_change_direction = 0; // 1=左, 2=右
+std::chrono::steady_clock::time_point g_lane_change_timer;
+bool g_is_returning_to_lane = false; // 新增：标记是否处于"回归原车道"阶段
+
 int changeroad = 0; // 变道检测结果 (0=未识别, 1=左转, 2=右转)
 bool has_detected_turn_sign = false; // 是否已成功识别到转向标识
 
@@ -1004,8 +1012,29 @@ void motor_servo_contral()
 {
     float servo_pwm_now;
 
+    // 优先级 1: 闭环变道
+    if (g_lane_change_state != LANE_CHANGE_NONE)
+    {
+        if (g_lane_change_state == START_TURN) {
+            // 阶段1: 大角度转向以脱离当前车道
+            servo_pwm_now = (g_lane_change_direction == 1) ? 1100 : 480; // 左转给大舵角, 右转给小舵角
+        } else if (g_lane_change_state == CROSS_LANE) {
+            // 阶段2: 维持一定角度，直到找到新车道
+            servo_pwm_now = (g_lane_change_direction == 1) ? 950 : 600;
+        } else { // ALIGN_LANE
+            // 阶段3: 使用常规PD控制器对齐新车道
+            servo_pwm_now = servo_pd(160);
+        }
+        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE); // 变道时使用常规速度
+    }
+    // 优先级 2: 看到斑马线，保持直行
+    else if (is_zebra_visible)
+    {
+        servo_pwm_now = servo_pwm_mid;
+        // 速度由 banma_stop() 控制，这里不重复设置
+    }
     // 如果正在停车，则由主循环的计时器逻辑控制，这里不执行任何操作
-    if (is_stopping_at_zebra) {
+    else if (is_stopping_at_zebra) {
         return;
     }
 
@@ -1183,15 +1212,14 @@ int main(int argc, char* argv[])
                         cout << "[流程] 检测到转向标识：" << (changeroad == 1 ? "左转" : "右转") << endl;
                     }
                 } else {
-                    // 3秒结束，检查是否已识别到转向标识
+                    // 3秒结束，检查是否已成功识别到转向标识
                     if (has_detected_turn_sign) {
-                        // 已识别到转向标识，执行转向
+                        // 已识别到转向标识，启动闭环变道状态机，取代旧的motor_changeroad()
                         is_stopping_at_zebra = false;
-                        cout << "[流程] 停车时间结束，执行" << (changeroad == 1 ? "左转" : "右转") << "动作" << endl;
-                        motor_changeroad(); // 执行转向动作
-                        flag_turn_done = 1; // 标记转向完成
-                        is_parking_phase = true; // 进入寻找车库阶段
-                        cout << "[流程] 转向完成，开始寻找并识别A/B车库" << endl;
+                        g_lane_change_state = START_TURN;
+                        g_lane_change_direction = changeroad;
+                        g_lane_change_timer = std::chrono::steady_clock::now();
+                        cout << "[流程] 停车时间结束，开始执行闭环变道 -> " << (changeroad == 1 ? "左转" : "右转") << endl;
                     } else {
                         // 未识别到转向标识，继续等待并检测
                         cout << "[警告] 未检测到转向标识，继续等待识别..." << endl;
@@ -1202,8 +1230,58 @@ int main(int argc, char* argv[])
             else if (is_parking_phase)
             {
                 // 状态4: 寻找并进入车库。融合了常规巡线、目标搜索、目标跟随、计数和最终决策
-                Tracking(bin_image); // 无论是否看到目标，都先进行常规巡线，为servo_pd()提供基础
-                
+                Tracking(bin_image); // 识别常规车道线
+
+                // 新增：闭环变道状态机逻辑
+                if (g_lane_change_state != LANE_CHANGE_NONE)
+                {
+                    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_lane_change_timer).count();
+
+                    if (g_lane_change_state == START_TURN)
+                    {
+                        if (elapsed_ms > 800) { // 阶段1持续时间
+                            g_lane_change_state = CROSS_LANE;
+                            cout << "[变道] 状态 -> 正在穿越 (CROSS_LANE)" << endl;
+                        }
+                    }
+                    else if (g_lane_change_state == CROSS_LANE)
+                    {
+                        // 检查是否已经找到新车道线
+                        bool found_new_lane = false;
+                        if (g_lane_change_direction == 1 && !left_line.empty()) { // 左转时，寻找左侧车道线
+                            if (left_line.back().x > 5) found_new_lane = true; // 左线不再贴边
+                        } else if (g_lane_change_direction == 2 && !right_line.empty()) { // 右转时，寻找右侧车道线
+                            if (right_line.back().x < 315) found_new_lane = true; // 右线不再贴边
+                        }
+
+                        if (found_new_lane) {
+                            g_lane_change_state = ALIGN_LANE;
+                            g_lane_change_timer = std::chrono::steady_clock::now();
+                            cout << "[变道] 状态 -> 对齐新车道 (ALIGN_LANE)" << endl;
+                        }
+                    }
+                    else if (g_lane_change_state == ALIGN_LANE)
+                    {
+                        if (elapsed_ms > 1500) { // 阶段3持续时间，用于稳定车身
+                            if (g_is_returning_to_lane) {
+                                // 如果"回归"阶段已完成，则整个变道动作结束
+                                g_lane_change_state = LANE_CHANGE_NONE;
+                                g_is_returning_to_lane = false; // 重置标志
+                                flag_turn_done = 1;
+                                is_parking_phase = true;
+                                cout << "[变道] 完成回归，整个变道动作结束，开始寻找A/B车库" << endl;
+                            } else {
+                                // 如果"变出去"阶段已完成，则立即开始"回归"
+                                g_is_returning_to_lane = true;
+                                g_lane_change_direction = (g_lane_change_direction == 1) ? 2 : 1; // 方向反转
+                                g_lane_change_state = START_TURN; // 重启状态机
+                                g_lane_change_timer = std::chrono::steady_clock::now();
+                                cout << "[变道] 已进入邻道，开始回归原车道..." << endl;
+                            }
+                        }
+                    }
+                }
+
                 result_ab.clear();
                 result_ab = fastestdet_ab->detect(frame); // 检测A/B
 
@@ -1308,10 +1386,12 @@ int main(int argc, char* argv[])
                 // 状态0/1: 默认巡航状态 (寻找障碍物或斑马线)
                 Tracking(bin_image); // 识别常规车道线
 
-                if (count_bz >= 1 && flag_turn_done == 0)
+                if (count_bz >= 1 && flag_turn_done == 0 && g_lane_change_state == LANE_CHANGE_NONE)
                 {
                     // 状态1: 已完成至少一次避障，且尚未完成转向，此时寻找斑马线
                     banma = banma_get(frame);
+                    is_zebra_visible = (banma == 1); // 更新斑马线可见状态
+
                     if (banma == 1) {
                         is_stopping_at_zebra = true; //切换到停车状态
                         has_detected_turn_sign = false; // 重置转向标识检测标志
