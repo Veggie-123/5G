@@ -111,8 +111,12 @@ int flag_turn_done = 0; // 转向完成标志
 std::chrono::steady_clock::time_point zebra_stop_start_time;
 bool is_stopping_at_zebra = false;
 bool is_parking_phase = false; // 是否进入寻找车库阶段
-int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 const int PARKING_Y_THRESHOLD = 200; // 触发入库的Y轴阈值
+
+// 新增：停车阶段逻辑变量
+bool is_following_park_target = false; // 是否在跟随A/B目标
+int count_park_A = 0;                  // A车库看到次数
+int count_park_B = 0;                  // B车库看到次数
 
 // 定义舵机和电机引脚号、PWM范围、PWM频率、PWM占空比解锁值
 const int servo_pin = 12; // 存储舵机引脚号
@@ -1013,7 +1017,13 @@ void motor_servo_contral()
     if (is_parking_phase)
     {
         // 状态4: 寻找并进入车库
-        servo_pwm_now = servo_pd_AB(160); // 使用为停车优化的PD控制
+        if (is_following_park_target) {
+            // 如果看到了A/B标志，则使用PD对准标志中心
+            servo_pwm_now = servo_pd_AB(160); // servo_pd_AB 使用全局 'park_mid'
+        } else {
+            // 如果没看到A/B标志，则继续常规巡线
+            servo_pwm_now = servo_pd(160);
+        }
         gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK); // 停车时使用稳定速度
     }
     else if (is_in_avoidance) { // 使用避障状态锁来决定控制策略
@@ -1191,36 +1201,62 @@ int main(int argc, char* argv[])
             }
             else if (is_parking_phase)
             {
-                // 状态4: 寻找并进入车库
-                Tracking(bin_image); // 继续基础巡线以保持姿态
+                // 状态4: 寻找并进入车库。融合了常规巡线、目标搜索、目标跟随、计数和最终决策
+                Tracking(bin_image); // 无论是否看到目标，都先进行常规巡线，为servo_pd()提供基础
                 
                 result_ab.clear();
-                result_ab = fastestdet_ab->detect(frame); // 使用FastestDet模型检测A/B
+                result_ab = fastestdet_ab->detect(frame); // 检测A/B
 
-                DetectObject closest_box = {cv::Rect_<float>(0, 0, 0, 0), -1, 0.0f};
-                
-                if (!result_ab.empty())
+                // 新增：筛选出底部在巡线区域下方的有效目标
+                std::vector<DetectObject> valid_targets;
+                for (const auto& box : result_ab) {
+                    if ((box.rect.y + box.rect.height) > LINE_ROI_TOP_Y) {
+                        valid_targets.push_back(box);
+                    }
+                }
+
+                if (!valid_targets.empty())
                 {
-                    // 找到y2最大的那个检测框，即离得最近的
-                    for(const auto& box : result_ab) {
-                        float box_y2 = box.rect.y + box.rect.height;
-                        float closest_y2 = closest_box.rect.y + closest_box.rect.height;
-                        if (box_y2 > closest_y2) {
-                            closest_box = box;
+                    is_following_park_target = true; // 看到了有效目标，切换到跟随模式
+
+                    // 从有效目标中找到y2最大的那个检测框，即离得最近的
+                    DetectObject closest_box = valid_targets[0];
+                    for(size_t i = 1; i < valid_targets.size(); ++i) {
+                        if ((valid_targets[i].rect.y + valid_targets[i].rect.height) > (closest_box.rect.y + closest_box.rect.height)) {
+                            closest_box = valid_targets[i];
                         }
                     }
                     
+                    // 更新要对准的目标中心点，供servo_pd_AB()使用
+                    park_mid = closest_box.rect.x + closest_box.rect.width / 2;
+
+                    // 根据最近目标的标签，累加计数器
+                    if (closest_box.label == 0) { // 0 for A
+                        count_park_A++;
+                        cout << "[停车] 跟随目标: A (A计数:" << count_park_A << ", B计数:" << count_park_B << ")" << endl;
+                    } else { // 1 for B
+                        count_park_B++;
+                        cout << "[停车] 跟随目标: B (A计数:" << count_park_A << ", B计数:" << count_park_B << ")" << endl;
+                    }
+                    
                     float closest_y2 = closest_box.rect.y + closest_box.rect.height;
-                    latest_park_id = closest_box.label + 1; // 0 for A -> 1, 1 for B -> 2
-                    cout << "[停车] 检测到最近车库: " << (latest_park_id == 1 ? "A" : "B") 
-                         << "，底部位置: " << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
+                    cout << "[停车] 最近目标底部: " << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
 
                     // 检查是否达到入库阈值
                     if (closest_y2 >= PARKING_Y_THRESHOLD) {
-                        cout << "[停车] 已达到入库阈值，执行入库 -> " << (latest_park_id == 1 ? "A" : "B") << endl;
-                        gohead(latest_park_id);
-                        is_parking_phase = false; // 避免重复执行
+                        int final_park_target = (count_park_A > count_park_B) ? 1 : 2; // 1 for A, 2 for B
+                        cout << "[停车] 达到入库阈值！最终选择 -> " << (final_park_target == 1 ? "A" : "B") 
+                             << " (计数 A:" << count_park_A << ", B:" << count_park_B << ")" << endl;
+
+                        gohead(final_park_target);
+                        is_parking_phase = false; // 停车动作完成，退出停车阶段
                     }
+                }
+                else 
+                {
+                    // 视野中没有A/B目标，切换回常规巡线模式
+                    is_following_park_target = false;
+                    cout << "[停车] 未检测到A/B目标，执行常规巡线" << endl;
                 }
             }
             else if (is_in_avoidance)
@@ -1283,7 +1319,8 @@ int main(int argc, char* argv[])
                         zebra_stop_start_time = std::chrono::steady_clock::now();
                         cout << "[流程] 避障结束，检测到斑马线，准备停车识别" << endl;
                         banma_stop(); // 执行停车
-                        system("mpg123 /home/pi/dev_ws/月半猫.mp3"); // 播放斑马线提示音
+                        // 使用 & 让语音播报在后台进行，不阻塞3秒停车计时
+                        system("mpg123 /home/pi/dev_ws/月半猫.mp3 &"); 
                     }
                 }
                 else
