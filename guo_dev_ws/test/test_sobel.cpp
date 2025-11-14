@@ -66,37 +66,29 @@ int main(int argc, char** argv) {
     Mat sobelX, sobelY;
     Sobel(blurredRoi, sobelX, CV_64F, 1, 0, 3); // x方向梯度
     Sobel(blurredRoi, sobelY, CV_64F, 0, 1, 3); // y方向梯度
-    Mat gradientMagnitude = cv::abs(sobelY) + 0.5 * cv::abs(sobelX); // x方向权重减半
+    Mat gradientMagnitude = cv::abs(sobelY + sobelX * 0.5); // x方向权重减半
     Mat gradientMagnitude8u;
     convertScaleAbs(gradientMagnitude, gradientMagnitude8u);
     imshow("5. Sobel Gradient ROI", gradientMagnitude8u);
     cout << "按任意键继续..." << endl;
     waitKey(0);
     
-    // 颜色空间转换 + 自适应阈值，增强不同场景下的白色跑道线
-    Mat hsvRoi;
-    cvtColor(roi, hsvRoi, COLOR_BGR2HSV);
-    Mat vChannel;
-    extractChannel(hsvRoi, vChannel, 2); // 仅提取V通道
-
-    Mat claheOutput;
-    Ptr<CLAHE> clahe = createCLAHE(2.0, Size(4, 4));
-    clahe->apply(vChannel, claheOutput);
-    GaussianBlur(claheOutput, claheOutput, Size(5, 5), 0);
-    imshow("6. CLAHE V Channel ROI", claheOutput);
+    // 顶帽操作减弱阴影
+    Mat topHat;
+    Mat kernel = getStructuringElement(MORPH_RECT, Size(20, 3));
+    morphologyEx(blurredRoi, topHat, MORPH_TOPHAT, kernel);
+    imshow("6. Top-hat", topHat);
     cout << "按任意键继续..." << endl;
-    waitKey(0);  
+    waitKey(0);
 
     Mat adaptiveMask;
-    adaptiveThreshold(claheOutput, adaptiveMask, 255,
-                        ADAPTIVE_THRESH_MEAN_C, THRESH_BINARY,
-                      31, -10);
-    imshow("7. Adaptive Mask ROI", adaptiveMask);
+    threshold(topHat, adaptiveMask, 5, 255, THRESH_BINARY);
+    imshow("7. Top-hat Threshold", adaptiveMask);
     cout << "按任意键继续..." << endl;
     waitKey(0);
 
     Mat gradientMask;
-    threshold(gradientMagnitude8u, gradientMask, 30, 255, THRESH_BINARY);
+    threshold(gradientMagnitude8u, gradientMask, 20, 255, THRESH_BINARY);
     Mat gradientKernel = getStructuringElement(MORPH_RECT, Size(3, 3));
     dilate(gradientMask, gradientMask, gradientKernel);
     imshow("8. Gradient Mask ROI", gradientMask);
