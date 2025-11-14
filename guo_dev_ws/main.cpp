@@ -19,6 +19,8 @@
 using namespace std; // 使用标准命名空间
 using namespace cv; // 使用OpenCV命名空间
 
+bool program_finished = false; // 控制主循环退出的标志
+
 //------------速度参数配置------------------------------------------------------------------------------------------
 const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
 const int MOTOR_SPEED_DELTA_AVOID = 1300;  // 避障阶段速度增量
@@ -951,14 +953,14 @@ void gohead(int parkchose){
     }
     else if(parkchose == 2){ //try to find park B
         cout << "[停车调试] 前往B车库目标，执行前进动作" << endl;
-        gpioPWM(13, motor_pwm_mid + 2800);
-        gpioPWM(13, motor_pwm_mid + 800); // 设置电机PWM
-        gpioPWM(12, 690); // 设置舵机PWM
-        sleep(1);
-        gpioPWM(13, motor_pwm_mid + 800); // 设置电机PWM
-        gpioPWM(12, 650); // 设置舵机PW0M
+        gpioPWM(13, motor_pwm_mid - 3000); // 设置电机PWM
+        gpioPWM(13, motor_pwm_mid + 900); // 设置电机PWM
+        gpioPWM(12, servo_pwm_mid - 50); // 设置舵机PWM
+        sleep(0.3);
+        gpioPWM(13, motor_pwm_mid + 900); // 设置电机PWM
+        gpioPWM(12, servo_pwm_mid + 80); // 设置舵机PW0M
         // usleep(1800000);
-        sleep(2);
+        sleep(1);
         gpioPWM(13, motor_pwm_mid);
     }
 }
@@ -1117,7 +1119,7 @@ int main(int argc, char* argv[])
     auto lastDebugRefresh = std::chrono::steady_clock::now();
     cv::Mat lastDebugOverlay;
 
-    while (capture.read(frame)){
+    while (capture.read(frame) && !program_finished){
 
         // 安全检查：确保frame有效
         if (frame.empty()) {
@@ -1245,6 +1247,7 @@ int main(int argc, char* argv[])
                         cout << "[停车] 已达到入库阈值，执行入库 -> " << (latest_park_id == 1 ? "A" : "B") << endl;
                         gohead(latest_park_id);
                         is_parking_phase = false; // 避免重复执行
+                        program_finished = true; // 设置退出标志
                     }
                 }
                 else
@@ -1404,6 +1407,10 @@ continue;
 
     // 清理资源
     cout << "\n[清理] 释放模型资源..." << endl;
+    gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 确保电机停止
+    gpioPWM(servo_pin, servo_pwm_mid);               // 舵机回中
+    usleep(100000);                                  // 短暂延时
+
     if (fastestdet_obs) {
         delete fastestdet_obs;
         fastestdet_obs = nullptr;
