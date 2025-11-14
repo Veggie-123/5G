@@ -353,23 +353,16 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
     cv::Mat gradientMagnitude8U;
     cv::convertScaleAbs(gradientMagnitude, gradientMagnitude8U); // 转为8位方便阈值
 
-    cv::Mat hsvRoi;
-    cv::cvtColor(roi, hsvRoi, cv::COLOR_BGR2HSV); // ROI HSV分离亮度信息
-    cv::Mat vChannel;
-    cv::extractChannel(hsvRoi, vChannel, 2); // 仅提取V通道
-
-    cv::Mat claheOutput;
-    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(4, 4)); // 自适应直方图均衡
-    clahe->apply(vChannel, claheOutput);                       // 仅对V通道增强
-    cv::GaussianBlur(claheOutput, claheOutput, cv::Size(5, 5), 0);   // 平滑提升稳定性
+    // 顶帽操作减弱阴影
+    cv::Mat topHat;
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(20, 3));
+    cv::morphologyEx(blurredRoi, topHat, cv::MORPH_TOPHAT, kernel);
 
     cv::Mat adaptiveMask;
-    cv::adaptiveThreshold(claheOutput, adaptiveMask, 255,
-                          cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY,
-                          31, -10); // 自适应阈值提取亮线
+    cv::threshold(topHat, adaptiveMask, 5, 255, cv::THRESH_BINARY);
 
     cv::Mat gradientMask;
-    cv::threshold(gradientMagnitude8U, gradientMask, 30, 255, cv::THRESH_BINARY); // 梯度二值掩码
+    cv::threshold(gradientMagnitude8U, gradientMask, 15, 255, cv::THRESH_BINARY); // 梯度二值掩码
     cv::Mat gradientKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
     cv::dilate(gradientMask, gradientMask, gradientKernel);
 

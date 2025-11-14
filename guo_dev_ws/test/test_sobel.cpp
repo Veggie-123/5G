@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
     waitKey(0);
 
     Mat gradientMask;
-    threshold(gradientMagnitude8u, gradientMask, 20, 255, THRESH_BINARY);
+    threshold(gradientMagnitude8u, gradientMask, 15, 255, THRESH_BINARY);
     Mat gradientKernel = getStructuringElement(MORPH_RECT, Size(3, 3));
     dilate(gradientMask, gradientMask, gradientKernel);
     imshow("8. Gradient Mask ROI", gradientMask);
