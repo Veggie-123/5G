@@ -22,9 +22,9 @@ using namespace cv; // 使用OpenCV命名空间
 bool program_finished = false; // 控制主循环退出的标志
 
 //------------速度参数配置------------------------------------------------------------------------------------------
-const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
+const int MOTOR_SPEED_DELTA_CRUISE = 1100; // 常规巡航速度增量
 const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
-const int MOTOR_SPEED_DELTA_PARK = 900;   // 车库阶段速度增量
+const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
 
 //---------------调试选项-------------------------------------------------
 const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
@@ -32,7 +32,7 @@ const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，�
 
 //---------------性能统计---------------------------------------------------
 int number = 0; // 已处理帧计数
-bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
+bool SHOW_FPS = true; // 是否显示FPS信息，可通过命令行参数控制
 
 //------------有关的全局变量定义------------------------------------------------------------------------------------------
 
@@ -110,24 +110,21 @@ const int BZ_Y_UPPER_THRESHOLD = 170; // 可见障碍物底部阈值 (上限)
 const int BZ_Y_LOWER_THRESHOLD = 40; // 触发避障的Y轴下限阈值 (下限)
 
 int bz_detect_count = 0; // 障碍物连续检测计数
-const int BZ_DETECT_THRESHOLD = 2; // 确认障碍物出现的帧数阈值
+const int BZ_DETECT_THRESHOLD = 3; // 确认障碍物出现的帧数阈值
 
 //----------------停车相关---------------------------------------------------
-int park_mid = 160; // 停车车库中线检测结果
-int flag_gohead = 0; // 前进标志
 int flag_turn_done = 0; // 转向完成标志
 std::chrono::steady_clock::time_point zebra_stop_start_time;
 bool is_stopping_at_zebra = false;
 std::chrono::steady_clock::time_point post_zebra_delay_start_time; // Timer for delay after zebra crossing
 bool is_in_post_zebra_delay = false; // Flag for delay state after zebra crossing
 bool is_parking_phase = false; // 是否进入寻找车库阶段
+bool is_pre_parking = false; // 是否在预入库阶段
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
 const int PARKING_Y_THRESHOLD = 150; // 触发入库的Y轴阈值
-bool is_in_final_parking = false; // 是否处于最终入库冲刺阶段
-std::chrono::steady_clock::time_point final_parking_start_time; // 最终入库开始时间
-int final_parking_target_side = 0; // 最终入库目标：1 for A (left), 2 for B (right)
+int final_target_label = -1;       // 最终锁定的AB标志的label (0 for A, 1 for B)
 
 // 定义舵机和电机引脚号、PWM范围、PWM频率、PWM占空比解锁值
 const int servo_pin = 12; // 存储舵机引脚号
@@ -162,6 +159,16 @@ const float yuntai_UD_pwm_duty_cycle_unlock = 58.0; //大上下小
 std::vector<cv::Point> last_mid; // 存储上一次的中线，用于平滑滤波
 int blue_detect_count = 0; // 蓝色挡板连续检测计数
 const int BLUE_DETECT_THRESHOLD = 5; // 需要连续检测到的帧数才能确认找到蓝色挡板
+
+// 预入库阶段参数
+std::chrono::steady_clock::time_point pre_parking_start_time; // 预入库阶段开始时间
+const float PRE_PARKING_FIXED_STEER_DURATION = 0.8f; // 阶段1：写死舵机参数+固定速度的持续时间（秒）
+const float PRE_PARKING_LINE_FOLLOW_DURATION = 1.0f; // 阶段2：正常巡线的持续时间（秒）
+
+// 预入库阶段的转向参数（可调）
+const float PRE_PARKING_STEER_LEFT = servo_pwm_mid - 100;  // A车库（左）的初始转向PWM值
+const float PRE_PARKING_STEER_RIGHT = servo_pwm_mid + 100; // B车库（右）的初始转向PWM值
+
 
 //---------------蓝色检测参数------------------------------------------
 // HSV颜色范围
@@ -210,18 +217,6 @@ const int BANMA_MIN_COUNT = 4;
 
 // 形态学处理参数
 const int BANMA_MORPH_KERNEL_SIZE = 3;  // 形态学处理kernel大小（3x3）
-
-//---------------Yellow Garage Detection--------------------------------
-const int YELLOW_H_MIN = 22;
-const int YELLOW_H_MAX = 38;
-const int YELLOW_S_MIN = 100;
-const int YELLOW_S_MAX = 255;
-const int YELLOW_V_MIN = 80;
-const int YELLOW_V_MAX = 255;
-const double MIN_YELLOW_CONTOUR_AREA = 20.0;
-const int YELLOW_PARKING_OFFSET = 50; // 新增：入库时，目标点相对黄色竖线的偏移量
-
-int yellow_line_pidx = -1; // -1表示未找到黄色竖线
 
 //--------------------------------------------------------------------------
 
@@ -638,58 +633,6 @@ void Tracking_bz(cv::Mat &dilated_image)
     last_mid_bz = mid_bz;
 }
 
-// 功能: 在最终入库阶段，寻找黄色车库竖线作为引导
-int find_yellow_line_pidx(cv::Mat& frame) {
-    if (frame.empty()) {
-        return -1;
-    }
-
-    // 限制检测区域，调整到离车更近的图像下半部分
-    const cv::Rect roiRect(1, 60, 318, 150);
-    
-    // 安全检查，确保ROI在图像范围内
-    if (roiRect.x + roiRect.width > frame.cols || roiRect.y + roiRect.height > frame.rows) {
-        cerr << "[错误] find_yellow_line_pidx: ROI超出边界" << endl;
-        return -1;
-    }
-    cv::Mat roiFrame = frame(roiRect).clone();
-
-    cv::Mat hsv, mask;
-    cv::cvtColor(roiFrame, hsv, cv::COLOR_BGR2HSV);
-    cv::inRange(hsv, cv::Scalar(YELLOW_H_MIN, YELLOW_S_MIN, YELLOW_V_MIN),
-                     cv::Scalar(YELLOW_H_MAX, YELLOW_S_MAX, YELLOW_V_MAX), mask);
-
-    // 形态学操作，去除噪声
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel, cv::Point(-1,-1), 1);
-    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel, cv::Point(-1,-1), 1);
-
-    std::vector<cv::Vec4i> lines;
-    // 使用霍夫变换检测直线，进一步放宽参数
-    cv::HoughLinesP(mask, lines, 1, CV_PI / 180, 10, 8, 15);
-
-    double longest_length = 0;
-    int best_pidx = -1;
-
-    for (const auto &l : lines)
-    {
-        double angle = std::atan2(l[3] - l[1], l[2] - l[0]) * 180.0 / CV_PI;
-        double length = std::hypot(l[3] - l[1], l[2] - l[0]);
-
-        // 筛选垂直线 (角度在60到120度之间)，并满足最小长度
-        if (std::abs(std::abs(angle) - 90) < 30 && length > 8)
-        {
-            if (length > longest_length) {
-                longest_length = length;
-                // 使用线的中心点作为pidx，并转换为全图坐标
-                best_pidx = (l[0] + l[2]) / 2 + roiRect.x;
-            }
-        }
-    }
-    
-    return best_pidx;
-}
-
 // 比较两个轮廓的面积
 // 功能: 轮廓面积比较（用于排序，返回面积更大的在前）
 bool Contour_Area(const vector<Point>& contour1, const vector<Point>& contour2)
@@ -922,8 +865,8 @@ float servo_pd(int target) { // 赛道巡线控制
 
     int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
-    float kp = 1.0; // 比例系数
-    float kd = 2.0; // 微分系数
+    float kp = 0.8; // 比例系数
+    float kd = 1.6; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -956,8 +899,8 @@ float servo_pd_bz(int target) { // 避障巡线控制
     int pidx = mid_bz[(int)(mid_bz.size() / 2)].x;
 
     // float kp = 1.5; // 比例系数
-    float kp = 2.0; // 比例系数
-    float kd = 5.0; // 微分系数
+    float kp = 1.5; // 比例系数
+    float kd = 4.0; // 微分系数
 
     error_first = target - pidx; // 计算误差
 
@@ -976,100 +919,7 @@ float servo_pd_bz(int target) { // 避障巡线控制
     return servo_pwm; // 返回舵机PWM值
 }
 
-// 功能: 停车阶段的PD控制器，基于车库检测中点
-float servo_pd_AB(int target) { // 避障巡线控制
 
-    int pidx = park_mid; // 计算中点的x坐标
-
-    float kp = 1.0; // 比例系数
-    float kd = 2.0; // 微分系数
-
-    error_first = target - pidx; // 计算误差
-
-    servo_pwm_diff = kp * error_first + kd * (error_first - last_error); // 计算舵机PWM差值
-    last_error = error_first; // 更新上一次误差
-
-    servo_pwm = servo_pwm_mid + servo_pwm_diff; // 计算舵机PWM值
-    
-    if (servo_pwm > 1000) // 如果PWM值大于900
-    {
-        servo_pwm = 1000; // 限制PWM值为900
-    }
-    else if (servo_pwm < 600) // 如果PWM值小于600
-    {
-        servo_pwm = 600; // 限制PWM值为600
-    }
-    return servo_pwm; // 返回舵机PWM值
-}
-
-// 功能: 最终入库PD控制器，基于偏移的巡线
-float servo_pd_parking(int side) { // side: 1 for A (left), 2 for B (right)
-    int pidx_final; // PD控制器的目标跟踪点
-
-    if (yellow_line_pidx != -1) {
-        // 策略1: 检测到黄色竖线，基于竖线位置计算目标点
-        cout << "[停车] 检测到黄色竖线，位置: " << yellow_line_pidx << endl;
-        if (side == 1) { // A库在左，目标点在黄线右侧
-            pidx_final = yellow_line_pidx - YELLOW_PARKING_OFFSET;
-        } else { // B库在右，目标点在黄线左侧
-            pidx_final = yellow_line_pidx + YELLOW_PARKING_OFFSET;
-        }
-    } else {
-        // 策略2: 未检测到黄色竖线，回退到基于黑线偏移的传统方法
-        cerr << "[警告] servo_pd_parking: 未检测到黄色竖线，使用黑线偏移作为后备方案" << endl;
-        if (mid.size() < 26) {
-            cerr << "[警告] servo_pd_parking: mid向量元素不足 (" << mid.size() << " < 26)，返回中值" << endl;
-            return servo_pwm_mid;
-        }
-        int pidx_raw = int((mid[23].x + mid[25].x) / 2); // 原始中线位置
-        const int PARKING_OFFSET_fallback = 30; // 传统偏移量
-        if (side == 1) { // A库，左边
-            pidx_final = pidx_raw - PARKING_OFFSET_fallback;
-        } else { // B库，右边
-            pidx_final = pidx_raw + PARKING_OFFSET_fallback;
-        }
-    }
-
-    float kp = 1.0; 
-    float kd = 2.0;
-
-    error_first = 160 - pidx_final; // 目标是使pidx_final对准屏幕中心160
-
-    servo_pwm_diff = kp * error_first + kd * (error_first - last_error);
-    last_error = error_first;
-    servo_pwm = servo_pwm_mid + servo_pwm_diff;
-
-    return servo_pwm;
-}
-
-
-// 功能: 根据最近识别的车库ID（A=1/B=2）执行入库动作序列
-void gohead(int parkchose){
-    if(parkchose == 1 ){ //try to find park A
-        std::cout << "[停车调试] 前往A车库目标，执行前进动作" << std::endl;
-        gpioPWM(13, motor_pwm_mid + 2800);
-        gpioPWM(13, motor_pwm_mid + 800); // 设置电机PWM
-        gpioPWM(12, 690); // 设置舵机PW0M
-        sleep(1);
-        gpioPWM(13, motor_pwm_mid + 800); // 设置电机PWM
-        gpioPWM(12, 780); // 设置舵机PW0M
-        // sleep(2);
-        usleep(2200000);
-        gpioPWM(13, motor_pwm_mid);
-    }
-    else if(parkchose == 2){ //try to find park B
-        cout << "[停车调试] 前往B车库目标，执行前进动作" << endl;
-        gpioPWM(13, motor_pwm_mid - 3000); // 设置电机PWM
-        gpioPWM(13, motor_pwm_mid + 900); // 设置电机PWM
-        gpioPWM(12, servo_pwm_mid - 50); // 设置舵机PWM
-        sleep(0.3);
-        gpioPWM(13, motor_pwm_mid + 900); // 设置电机PWM
-        gpioPWM(12, servo_pwm_mid + 80); // 设置舵机PW0M
-        // usleep(1800000);
-        sleep(1);
-        gpioPWM(13, motor_pwm_mid);
-    }
-}
 
 // 功能: 斑马线触发停车：电机回中、舵机回中并输出日志
 void banma_stop(){
@@ -1121,18 +971,31 @@ void motor_servo_contral()
         return;
     }
 
-    if (is_in_final_parking)
+    if (is_pre_parking)
     {
-        // 状态5: 最终入库
-        servo_pwm_now = servo_pd_parking(final_parking_target_side);
-        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK); // 使用入库速度
+        // 状态: 预入库阶段
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - pre_parking_start_time).count() / 1000.0f;
+        
+        if (elapsed < PRE_PARKING_FIXED_STEER_DURATION) {
+            // 阶段1: 写死舵机参数 + 固定速度
+            float steer_pwm = (final_target_label == 0) ? 
+                PRE_PARKING_STEER_LEFT : PRE_PARKING_STEER_RIGHT; // A左转，B右转
+            gpioPWM(servo_pin, steer_pwm);
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
+        } else if (elapsed < (PRE_PARKING_FIXED_STEER_DURATION + PRE_PARKING_LINE_FOLLOW_DURATION)) {
+            // 阶段2: 正常巡线
+            servo_pwm_now = servo_pd(160); // 使用常规PD控制巡线
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
+            gpioPWM(servo_pin, servo_pwm_now); // 设置舵机PWM
+        }
     }
     else if (is_parking_phase)
     {
         // 状态4: 寻找并进入车库
         if (latest_park_id != 0) {
             // 已识别到车库，切换到车库PD控制
-            servo_pwm_now = servo_pd_AB(160); 
+            servo_pwm_now = servo_pd(160); 
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
         } else {
             // 未识别到车库，继续常规巡线
@@ -1327,23 +1190,24 @@ int main(int argc, char* argv[])
                     cout << "[流程] 1.5秒巡线结束，开始寻找并识别A/B车库" << endl;
                 }
             }
-            else if (is_in_final_parking)
+            else if (is_pre_parking)
             {
-                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - final_parking_start_time).count();
-                if (elapsed_ms >= 1000) {
-                    cout << "[流程] 1秒入库完成，停车" << endl;
-                    // 明确地发送停车指令
-                    gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock - 3000); // 确保刹车
-                    usleep(100000); // 短暂延时以确保指令执行
+                // 状态: 预入库阶段
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - pre_parking_start_time).count() / 1000.0f;
+                
+                if (elapsed < PRE_PARKING_FIXED_STEER_DURATION) {
+                    // 阶段1: 写死舵机参数 + 固定速度（不需要巡线，直接走）
+                } else if (elapsed < (PRE_PARKING_FIXED_STEER_DURATION + PRE_PARKING_LINE_FOLLOW_DURATION)) {
+                    // 阶段2: 正常巡线
+                    Tracking(bin_image); // 继续巡线
+                } else {
+                    // 阶段2结束，直接刹车
+                    cout << "[流程] 预入库完成，刹车！" << endl;
                     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 停车
                     gpioPWM(servo_pin, servo_pwm_mid); // 舵机回中
-                    program_finished = true; // 结束程序
-                    continue; // 跳过本轮的motor_servo_contral
-                } else {
-                    // 时间未到，进行黄色竖线巡线
-                    yellow_line_pidx = find_yellow_line_pidx(frame);
-                    // 同时保留黑线巡线作为后备
-                    Tracking(bin_image);
+                    program_finished = true;
+                    continue;
                 }
             }
             else if (is_parking_phase)
@@ -1380,7 +1244,6 @@ int main(int argc, char* argv[])
                             park_B_count++;
                         }
 
-                        park_mid = closest_box.rect.x + closest_box.rect.width / 2; // 更新车库中心点
                         float closest_y2 = closest_box.rect.y + closest_box.rect.height;
                         latest_park_id = closest_box.label + 1; // 0 for A -> 1, 1 for B -> 2
                         
@@ -1404,14 +1267,12 @@ int main(int argc, char* argv[])
                             }
 
                             if (park_target != 0) {
-                                //  gohead(park_target);
-                                //  is_parking_phase = false; // 避免重复执行
-                                //  program_finished = true; // 设置退出标志
-                                 is_parking_phase = false; // 切换到最终入库状态
-                                 is_in_final_parking = true;
-                                 final_parking_start_time = std::chrono::steady_clock::now();
-                                 final_parking_target_side = park_target;
-                                 cout << "[流程] 达到入库阈值，开始 " << (park_target == 1 ? "A" : "B") << " 库的最终入库程序" << endl;
+                                is_parking_phase = false; // 寻找阶段结束
+                                is_pre_parking = true; // 进入预入库阶段
+                                final_target_label = park_target - 1; // 锁定目标 (A->0, B->1)
+                                pre_parking_start_time = std::chrono::steady_clock::now(); // 启动计时器
+                                cout << "[流程] 达到初步阈值，锁定目标 " << (park_target == 1 ? "A(左)" : "B(右)") 
+                                     << "，开始预入库阶段（微调方向 -> 正常巡线 -> 刹车）" << endl;
                             }
                         }
                     }
