@@ -981,6 +981,7 @@ void motor_servo_contral()
             // 阶段1: 写死舵机参数 + 固定速度
             float steer_pwm = (final_target_label == 0) ? 
                 PRE_PARKING_STEER_LEFT : PRE_PARKING_STEER_RIGHT; // A左转，B右转
+            servo_pwm_now = steer_pwm; // 设置servo_pwm_now，供函数末尾使用
             gpioPWM(servo_pin, steer_pwm);
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
         } else if (elapsed < (PRE_PARKING_FIXED_STEER_DURATION + PRE_PARKING_LINE_FOLLOW_DURATION)) {
@@ -988,6 +989,9 @@ void motor_servo_contral()
             servo_pwm_now = servo_pd(160); // 使用常规PD控制巡线
             gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
             gpioPWM(servo_pin, servo_pwm_now); // 设置舵机PWM
+        } else {
+            // 阶段2已结束，应该已经刹车（在主循环中处理），这里使用中值作为默认值
+            servo_pwm_now = servo_pwm_mid;
         }
     }
     else if (is_parking_phase)
