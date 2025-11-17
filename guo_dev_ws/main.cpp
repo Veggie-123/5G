@@ -172,7 +172,7 @@ const float PRE_PARKING_LINE_FOLLOW_DURATION = 0.5f; // 阶段2：正常巡线�
 
 // 预入库阶段的转向参数（可调）
 const float PRE_PARKING_STEER_LEFT = servo_pwm_mid + 30;  // A车库（左）的初始转向PWM值
-const float PRE_PARKING_STEER_RIGHT = servo_pwm_mid - 30; // B车库（右）的初始转向PWM值
+const float PRE_PARKING_STEER_RIGHT = servo_pwm_mid - 15; // B车库（右）的初始转向PWM值
 
 
 //---------------蓝色检测参数------------------------------------------

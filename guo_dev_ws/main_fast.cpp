@@ -25,6 +25,10 @@ bool program_finished = false; // 控制主循环退出的标志
 const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
 const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_PARK = 900;   // 车库阶段速度增量
+const int MOTOR_SPEED_DELTA_BRAKE = -3000; // 瞬时反转/刹停增量
+
+const float BRIEF_STOP_REVERSE_DURATION = 0.2f; // 反转阶段持续时间（秒）
+const float BRIEF_STOP_HOLD_DURATION = 0.2f;    // 刹停保持时间（秒）
 
 //---------------调试选项-------------------------------------------------
 const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
@@ -38,6 +42,14 @@ bool SHOW_FPS = true; // 是否显示FPS信息，可通过命令行参数控制
 
 std::vector<DetectObject> result; // 存储FastestDet检测结果 
 std::vector<DetectObject> result_ab; // 存储FastestDet检测结果
+
+enum class BriefStopType { None, Obstacle, Parking };
+enum class BriefStopNextAction { None, ResumeAvoidance, EnterPreParking };
+
+bool is_brief_stop_active = false;
+BriefStopNextAction brief_stop_next_action = BriefStopNextAction::None;
+std::chrono::steady_clock::time_point brief_stop_start_time;
+int pending_pre_parking_label = -1;
 
 // 模型路径配置
 std::string model_param_obs = "models/obs.param";
@@ -92,7 +104,6 @@ bool has_detected_turn_sign = false; // 是否已成功识别到转向标识
 
 //----------------避障相关---------------------------------------------------
 int bz_heighest = 0; // 避障高度
-int bz_xcenter = 0; // 存储避障中心点
 int bz_get = 0;
 std::vector<cv::Point> mid_bz; // 存储中线
 std::vector<cv::Point> left_line_bz; // 存储左线条
@@ -172,7 +183,7 @@ const float PRE_PARKING_LINE_FOLLOW_DURATION = 0.5f; // 阶段2：正常巡线�
 
 // 预入库阶段的转向参数（可调）
 const float PRE_PARKING_STEER_LEFT = servo_pwm_mid + 30;  // A车库（左）的初始转向PWM值
-const float PRE_PARKING_STEER_RIGHT = servo_pwm_mid - 30; // B车库（右）的初始转向PWM值
+const float PRE_PARKING_STEER_RIGHT = servo_pwm_mid - 15; // B车库（右）的初始转向PWM值
 
 
 //---------------蓝色检测参数------------------------------------------
@@ -794,7 +805,6 @@ void blue_card_remove(void) // 输入为mask图像
     if (validContours.empty()) 
     {
         fache_sign = 1;
-        sleep(1);
         // 挡板移开后开始计时，延时2秒再允许控制函数运行
         is_start_delay = true;
         start_delay_time = std::chrono::steady_clock::now();
@@ -936,6 +946,42 @@ void banma_stop(){
     cout << "[流程] 检测到斑马线，车辆停车3秒等待指令" << endl;
 }
 
+void start_brief_stop(BriefStopType type, BriefStopNextAction next_action)
+{
+    is_brief_stop_active = true;
+    brief_stop_next_action = next_action;
+    brief_stop_start_time = std::chrono::steady_clock::now();
+
+    std::string reason;
+    if (type == BriefStopType::Obstacle) {
+        reason = "障碍物";
+    } else if (type == BriefStopType::Parking) {
+        reason = "入库阈值";
+    } else {
+        reason = "未知";
+    }
+    cout << "[流程] " << reason << "触发短暂停车，执行反向刹停..." << endl;
+}
+
+void finalize_brief_stop_action()
+{
+    if (brief_stop_next_action == BriefStopNextAction::EnterPreParking && pending_pre_parking_label != -1)
+    {
+        is_pre_parking = true;
+        pre_parking_start_time = std::chrono::steady_clock::now();
+        final_target_label = pending_pre_parking_label;
+        cout << "[流程] 短暂停车结束，开始预入库阶段 -> "
+             << (final_target_label == 0 ? "A(左)" : "B(右)") << endl;
+        pending_pre_parking_label = -1;
+    }
+    else if (brief_stop_next_action == BriefStopNextAction::ResumeAvoidance)
+    {
+        cout << "[流程] 短暂停车结束，继续避障巡线" << endl;
+    }
+
+    brief_stop_next_action = BriefStopNextAction::None;
+}
+
 // 功能: 按照 `changeroad` 状态执行左/右变道动作序列
 void motor_changeroad(){
     if(changeroad == 1){ // 向左变道----------------------------------------------------------------
@@ -989,6 +1035,29 @@ void motor_servo_contral()
             return;
         } else {
             is_start_delay = false; // 延时结束，后续正常控制
+        }
+    }
+
+    if (is_brief_stop_active)
+    {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - brief_stop_start_time).count() / 1000.0f;
+
+        if (elapsed < BRIEF_STOP_REVERSE_DURATION)
+        {
+            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_BRAKE); // 瞬时反转
+            return;
+        }
+        else if (elapsed < (BRIEF_STOP_REVERSE_DURATION + BRIEF_STOP_HOLD_DURATION))
+        {
+            gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 原地等待
+            return;
+        }
+        else
+        {
+            is_brief_stop_active = false;
+            finalize_brief_stop_action();
+            // 短暂停车完成后继续执行后续控制逻辑
         }
     }
 
@@ -1171,6 +1240,8 @@ int main(int argc, char* argv[])
             if (SHOW_SOBEL_DEBUG) cv::waitKey(1);
 
             // 2. 主状态机逻辑
+            // 短暂停车期间，根据后续动作继续执行相应逻辑（巡线、避障、车库检测等）
+            // 但不会触发新的短暂停车，控制逻辑由motor_servo_contral()处理
             if (is_stopping_at_zebra)
             {
                 // 状态2: 在斑马线处停车，并检测转向标志
@@ -1235,9 +1306,9 @@ int main(int argc, char* argv[])
                     continue;
                 }
             }
-            else if (is_parking_phase)
+            else if (is_parking_phase || (is_brief_stop_active && brief_stop_next_action == BriefStopNextAction::EnterPreParking))
             {
-                // 状态4: 寻找并进入车库
+                // 状态4: 寻找并进入车库（包括短暂停车期间继续检测）
                 Tracking(bin_image); // 继续基础巡线以保持姿态
                 
                 result_ab.clear();
@@ -1276,8 +1347,8 @@ int main(int argc, char* argv[])
                              << " | 计数 A:" << park_A_count << ", B:" << park_B_count
                              << " | Y:" << (int)closest_y2 << "/" << PARKING_Y_THRESHOLD << endl;
 
-                        // 检查是否达到入库阈值
-                        if (closest_y2 >= PARKING_Y_THRESHOLD) {
+                        // 检查是否达到入库阈值（短暂停车期间不触发新的停车）
+                        if (closest_y2 >= PARKING_Y_THRESHOLD && !is_brief_stop_active) {
                             int park_target = 0;
                             if (park_A_count > park_B_count) {
                                 park_target = 1; // Park in A
@@ -1293,11 +1364,11 @@ int main(int argc, char* argv[])
 
                             if (park_target != 0) {
                                 is_parking_phase = false; // 寻找阶段结束
-                                is_pre_parking = true; // 进入预入库阶段
-                                final_target_label = park_target - 1; // 锁定目标 (A->0, B->1)
-                                pre_parking_start_time = std::chrono::steady_clock::now(); // 启动计时器
+                                is_pre_parking = false;
+                                pending_pre_parking_label = park_target - 1; // 锁定目标 (A->0, B->1)
+                                start_brief_stop(BriefStopType::Parking, BriefStopNextAction::EnterPreParking);
                                 cout << "[流程] 达到初步阈值，锁定目标 " << (park_target == 1 ? "A(左)" : "B(右)") 
-                                     << "，开始预入库阶段（微调方向 -> 正常巡线 -> 刹车）" << endl;
+                                     << "，先短暂停车再执行预入库微调" << endl;
                             }
                         }
                     }
@@ -1417,7 +1488,7 @@ int main(int argc, char* argv[])
                         bz_detect_count = 0;
                     }
 
-                    if (bz_detect_count >= BZ_DETECT_THRESHOLD) {
+                    if (bz_detect_count >= BZ_DETECT_THRESHOLD && !is_brief_stop_active) {
                         is_in_avoidance = true; // 启动并锁定避障状态
                         cout << "[流程] 确认蓝色障碍物，进入避障模式" << endl;
                         
@@ -1441,6 +1512,7 @@ int main(int argc, char* argv[])
                         }
                         Tracking_bz(bin_image); 
                         
+                        start_brief_stop(BriefStopType::Obstacle, BriefStopNextAction::ResumeAvoidance);
                         bz_detect_count = 0; // 重置计数器，避免重复进入
                     }
                 }
