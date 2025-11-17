@@ -13,6 +13,9 @@
 #include <vector> // 向量容器库
 #include <chrono> // 时间库
 #include <iomanip> // 格式化输出
+#include <ctime> // 时间格式化
+#include <sstream> // 字符串流
+#include <sys/stat.h> // 目录操作
 
 #include "fastestdet.hpp" // FastestDet库
 
@@ -32,7 +35,7 @@ const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，�
 
 //---------------性能统计---------------------------------------------------
 int number = 0; // 已处理帧计数
-bool SHOW_FPS = true; // 是否显示FPS信息，可通过命令行参数控制
+bool SHOW_FPS = false; // 是否显示FPS信息，可通过命令行参数控制
 
 //------------有关的全局变量定义------------------------------------------------------------------------------------------
 
@@ -130,6 +133,11 @@ int final_target_label = -1;       // 最终锁定的AB标志的label (0 for A, 
 // 发车延时相关：挡板移开后等待3秒再开始电机/舵机控制
 bool is_start_delay = false; // 挡板移开后的发车延时标志
 std::chrono::steady_clock::time_point start_delay_time; // 挡板移开时间戳
+
+//----------------图像保存相关---------------------------------------------------
+std::chrono::steady_clock::time_point last_save_time; // 上次保存图像的时间
+const int SAVE_INTERVAL_SECONDS = 30; // 保存间隔（秒）
+const std::string SAVE_DIR = "captured_images"; // 保存目录
 
 // 定义舵机和电机引脚号、PWM范围、PWM频率、PWM占空比解锁值
 const int servo_pin = 12; // 存储舵机引脚号
@@ -936,6 +944,69 @@ void banma_stop(){
     cout << "[流程] 检测到斑马线，车辆停车3秒等待指令" << endl;
 }
 
+// 功能: 在图像上绘制时间戳（加8小时时差）并保存
+void save_frame_with_timestamp(const cv::Mat& frame) {
+    // 创建保存目录（如果不存在）
+    struct stat info;
+    if (stat(SAVE_DIR.c_str(), &info) != 0) {
+        // 目录不存在，创建它
+        mkdir(SAVE_DIR.c_str(), 0755);
+    }
+
+    // 获取当前时间（系统时间）
+    auto now = std::chrono::system_clock::now();
+    // 加上8小时时差（8小时 = 8 * 3600秒）
+    auto china_time = now + std::chrono::hours(8);
+    
+    // 转换为time_t以便格式化
+    std::time_t time_t_china = std::chrono::system_clock::to_time_t(china_time);
+    
+    // 格式化为字符串：YYYY-MM-DD HH:MM:SS
+    std::tm* tm_info = std::gmtime(&time_t_china);
+    std::ostringstream oss;
+    oss << std::put_time(tm_info, "%Y-%m-%d %H:%M:%S");
+    std::string timestamp_str = oss.str();
+
+    // 克隆图像以便绘制时间戳
+    cv::Mat frame_with_timestamp = frame.clone();
+
+    // 在图像上绘制时间戳（左上角，绿色文字，带黑色边框以提高可读性）
+    int font_face = cv::FONT_HERSHEY_SIMPLEX;
+    double font_scale = 0.6;
+    int thickness = 2;
+    cv::Scalar text_color(0, 255, 0); // 绿色
+    cv::Scalar outline_color(0, 0, 0); // 黑色边框
+    
+    cv::Point text_pos(10, 30); // 左上角位置
+    
+    // 先绘制黑色边框（稍微偏移）
+    for (int dx = -1; dx <= 1; dx++) {
+        for (int dy = -1; dy <= 1; dy++) {
+            if (dx != 0 || dy != 0) {
+                cv::putText(frame_with_timestamp, timestamp_str, 
+                           cv::Point(text_pos.x + dx, text_pos.y + dy),
+                           font_face, font_scale, outline_color, thickness + 1);
+            }
+        }
+    }
+    
+    // 再绘制绿色文字
+    cv::putText(frame_with_timestamp, timestamp_str, text_pos,
+                font_face, font_scale, text_color, thickness);
+
+    // 生成文件名（使用时间戳作为文件名）
+    std::ostringstream filename_oss;
+    filename_oss << std::put_time(tm_info, "%Y%m%d_%H%M%S");
+    std::string filename = SAVE_DIR + "/" + filename_oss.str() + ".jpg";
+
+    // 保存图像（如果文件已存在会自动覆盖）
+    if (cv::imwrite(filename, frame_with_timestamp)) {
+        cout << "[图像保存] 已保存: " << filename << " (时间戳: " << timestamp_str << ")" << endl;
+    } else {
+        cerr << "[错误] 保存图像失败: " << filename << endl;
+    }
+}
+
 // 功能: 按照 `changeroad` 状态执行左/右变道动作序列
 void motor_changeroad(){
     if(changeroad == 1){ // 向左变道----------------------------------------------------------------
@@ -1118,6 +1189,9 @@ int main(int argc, char* argv[])
 
     auto lastDebugRefresh = std::chrono::steady_clock::now();
     cv::Mat lastDebugOverlay;
+    
+    // 初始化图像保存时间（设置为过去时间，这样发车后第一次检查就会立即保存）
+    last_save_time = std::chrono::steady_clock::now() - std::chrono::seconds(SAVE_INTERVAL_SECONDS);
 
     while (capture.read(frame) && !program_finished){
 
@@ -1133,6 +1207,15 @@ int main(int argc, char* argv[])
 
             // 记录单帧处理起始时间
             auto start = std::chrono::high_resolution_clock::now();
+            
+            // 检查是否需要保存图像（每隔30秒，程序启动后就开始计时）
+            auto current_time = std::chrono::steady_clock::now();
+            auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                current_time - last_save_time).count();
+            if (elapsed_seconds >= SAVE_INTERVAL_SECONDS) {
+                save_frame_with_timestamp(frame);
+                last_save_time = current_time; // 更新上次保存时间
+            }
             
             // 2. 发车逻辑：检测蓝色挡板
             if (fache_sign == 0) // 发车标志为0，说明还未发车
