@@ -25,10 +25,10 @@ using namespace cv; // 使用OpenCV命名空间
 bool program_finished = false; // 控制主循环退出的标志
 
 //------------速度参数配置------------------------------------------------------------------------------------------
-const int MOTOR_SPEED_DELTA_CRUISE = 1500; // 常规巡航速度增量
-const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
 const int MOTOR_SPEED_DELTA_BRAKE = -3000; // 瞬时反转/刹停增量
+const int MOTOR_SPEED_DELTA_PRE_ZEBRA = 2000;  // 蓝板移开后到斑马线停车前的巡线速度
+const int MOTOR_SPEED_DELTA_POST_ZEBRA = 1500; // 斑马线停车后到车库停车前的巡线速度
 
 const float BRIEF_STOP_REVERSE_DURATION = 0.5f; // 反转阶段持续时间（秒）
 const float BRIEF_STOP_HOLD_DURATION = 0.1f;    // 刹停保持时间（秒）
@@ -87,6 +87,11 @@ const int MIN_COMPONENT_AREA = 400; // 连通区域最小面积阈值（用于�
 std::vector<cv::Point> mid; // 存储中线
 std::vector<cv::Point> left_line; // 存储左线条
 std::vector<cv::Point> right_line; // 存储右线条
+int current_lane_speed_delta = MOTOR_SPEED_DELTA_PRE_ZEBRA; // 当前速度增量
+
+enum class TrackingBias { Center, LeftQuarter, RightQuarter };
+TrackingBias current_tracking_bias = TrackingBias::Center;
+const TrackingBias ZEBRA_TRACKING_BIAS = TrackingBias::LeftQuarter; // 寻斑马线时的偏置
 
 //---------------舵机和电机相关---------------------------------------------
 int error_first; // 存储第一次误差
@@ -566,6 +571,14 @@ void Tracking(cv::Mat &dilated_image)
         const cv::Point &left_point = left_line.back();
         const cv::Point &right_point = right_line.back();
         int mid_x = (left_point.x + right_point.x) / 2;
+        if (current_tracking_bias == TrackingBias::LeftQuarter)
+        {
+            mid_x = (left_point.x + mid_x) / 2;
+        }
+        else if (current_tracking_bias == TrackingBias::RightQuarter)
+        {
+            mid_x = (right_point.x + mid_x) / 2;
+        }
         mid.emplace_back(mid_x, i); // 记录中点
 
         // 更新下一行的搜索起点
@@ -975,6 +988,7 @@ float servo_pd_parking(int target) { // 跟随AB目标控制
 void banma_stop(){
     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock - 3000); // 解锁状态，即停车
     usleep(500000);
+
     cout << "[流程] 检测到斑马线，车辆停车3秒等待指令" << endl;
 }
 
@@ -1186,25 +1200,15 @@ void motor_servo_contral()
     }
     else if (is_parking_phase)
     {
-        // 状态4: 寻找并进入车库
-        if (latest_park_id != 0) {
-            // 已识别到车库，切换到车库PD控制
-            servo_pwm_now = servo_pd(160); 
-            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
-        } else {
-            // 未识别到车库，继续常规巡线
-            servo_pwm_now = servo_pd(160);
-            gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE);
-        }
+        // 状态4: 寻找并进入车库标识
+        servo_pwm_now = servo_pd(160);
+        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_POST_ZEBRA);
     }
-    else if (is_in_avoidance) { // 使用避障状态锁来决定控制策略
-        // 状态：正在主动避障
-        servo_pwm_now = servo_pd_bz(160); // 使用为避障优化的PD控制
-        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_AVOID); // 避障时使用较慢速度
-    } else {
-        // 状态：常规巡线（包括寻找斑马线，或避障间隙）
-        servo_pwm_now = servo_pd(160); // 使用常规PD控制
-        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE); // 使用常规速度
+    else
+    {
+        // 状态：常规巡线（包括寻找斑马线、斑马线后延迟等）
+        servo_pwm_now = servo_pd(160);
+        gpioPWM(motor_pin, motor_pwm_mid + current_lane_speed_delta);
     }
     gpioPWM(servo_pin, servo_pwm_now);
 }
@@ -1341,6 +1345,8 @@ int main(int argc, char* argv[])
                 cv::Mat* debugPtr = (SHOW_SOBEL_DEBUG && shouldRefreshDebug) ? &debugOverlay : nullptr;
                 
                 bin_image = ImageSobel(frame, debugPtr); // Sobel等处理提取二值化图像
+                current_tracking_bias = TrackingBias::Center;
+                current_lane_speed_delta = MOTOR_SPEED_DELTA_PRE_ZEBRA;
 
             // (可选) 显示调试图像
             if (SHOW_SOBEL_DEBUG && shouldRefreshDebug)
@@ -1388,6 +1394,8 @@ int main(int argc, char* argv[])
             {
                 // 状态: 斑马线后延迟巡线
                 Tracking(bin_image); // 正常巡线
+                current_tracking_bias = TrackingBias::Center;
+                current_lane_speed_delta = MOTOR_SPEED_DELTA_POST_ZEBRA;
 
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - post_zebra_delay_start_time).count();
                 if (elapsed >= 2)
@@ -1402,6 +1410,8 @@ int main(int argc, char* argv[])
             {
                 // 状态: 预入库阶段 - 跟随最远的A或B目标
                 Tracking(bin_image); // 继续巡线，用于检测不到时使用巡线坐标
+                current_tracking_bias = TrackingBias::Center;
+                current_lane_speed_delta = MOTOR_SPEED_DELTA_POST_ZEBRA;
                 
                 // 检测A/B目标
                 result_ab.clear();
@@ -1462,6 +1472,8 @@ int main(int argc, char* argv[])
             {
                 // 状态4: 寻找并进入车库（包括短暂停车期间继续检测）
                 Tracking(bin_image); // 继续基础巡线以保持姿态
+                current_tracking_bias = TrackingBias::Center;
+                current_lane_speed_delta = MOTOR_SPEED_DELTA_POST_ZEBRA;
                 
                 result_ab.clear();
                 result_ab = fastestdet_ab->detect(frame); // 使用FastestDet模型检测A/B
@@ -1534,138 +1546,30 @@ int main(int argc, char* argv[])
                     latest_park_id = 0; // 未检测到，重置
                 }
             }
-            else if (is_in_avoidance)
-            {
-                // 状态3: 正在执行避障
-                Tracking(bin_image); // 仍然需要常规巡线来获取左右边界参考
-                
-                bz_get = 0;
-                result = fastestdet_obs->detect(frame);
-                DetectObject blue_box;
-                bool blue_obstacle_found = false;
-                for (const auto& box : result)
-                {
-                    int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
-                    // 仅当类别为 blue(label=0) 且在有效高度范围内时才认为是障碍物
-                    if (box.label == 0 &&
-                        box_y2 < BZ_Y_UPPER_THRESHOLD && box_y2 > BZ_Y_LOWER_THRESHOLD)
-                    {
-                        blue_box = box;
-                        blue_obstacle_found = true;
-                        break;
-                    }
-                }
-
-                if (blue_obstacle_found) {
-                    bz_get = 1;
-                    int box_x1 = static_cast<int>(blue_box.rect.x);
-                    int box_x2 = static_cast<int>(blue_box.rect.x + blue_box.rect.width);
-                    int box_y1 = static_cast<int>(blue_box.rect.y);
-                    int box_y2 = static_cast<int>(blue_box.rect.y + blue_box.rect.height);
-                    last_known_bz_xcenter = (box_x1 + box_x2) / 2;
-                    last_known_bz_x1 = box_x1;
-                    last_known_bz_x2 = box_x2;
-                    last_known_bz_bottom = box_y2;
-                    last_known_bz_heighest = box_y1;
-                    bz_disappear_count = 0; // 障碍物可见，重置消失计数
-                }
-
-                if (bz_get == 0) {
-                    bz_disappear_count++; // 障碍物不可见，累加消失计数
-                }
-
-                // 只要在避障状态，就始终使用最后记录的位置进行补线
-                bz_heighest = last_known_bz_heighest; // 确保Tracking_bz使用正确的边界
-                if (last_known_bz_xcenter > 160) {
-                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
-                } else {
-                    bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
-                }
-                Tracking_bz(bin_image);
-
-                // 检查是否满足退出避障的条件
-                if (bz_disappear_count >= BZ_DISAPPEAR_THRESHOLD) {
-                    is_in_avoidance = false;
-                    count_bz++;
-                    bz_disappear_count = 0;
-                    cout << "[流程] 障碍物已安全绕过，退出避障模式" << endl;
-                }
-            }
             else
             {
-                // 状态0/1: 默认巡航状态 (寻找障碍物或斑马线)
+                // 状态: 常规巡航（寻找斑马线或保持居中）
                 Tracking(bin_image); // 识别常规车道线
 
-                if (count_bz >= 1 && flag_turn_done == 0)
+                if (flag_turn_done == 0)
                 {
-                    // 状态1: 已完成至少一次避障，且尚未完成转向，此时寻找斑马线
+                    current_tracking_bias = ZEBRA_TRACKING_BIAS;
+                    current_lane_speed_delta = MOTOR_SPEED_DELTA_PRE_ZEBRA;
                     banma = banma_get(frame);
                     if (banma == 1) {
                         is_stopping_at_zebra = true; //切换到停车状态
                         has_detected_turn_sign = false; // 重置转向标识检测标志
                         changeroad = 0; // 重置转向方向
                         zebra_stop_start_time = std::chrono::steady_clock::now();
-                        cout << "[流程] 避障结束，检测到斑马线，准备停车识别" << endl;
+                        cout << "[流程] 检测到斑马线，准备停车识别" << endl;
                         banma_stop(); // 执行停车
                         system("mpg123 /home/pi/dev_ws/月半猫.mp3 &"); // 播放斑马线提示音（后台播放）
                     }
                 }
                 else
                 {
-                    // 状态0: 默认状态，执行障碍物检测以启动避障
-                    result = fastestdet_obs->detect(frame);
-                    bool obstacle_found_this_frame = false;
-                    DetectObject blue_box;
-
-                    if (!result.empty()) {
-                        for (const auto& box : result) {
-                            int box_y2 = static_cast<int>(box.rect.y + box.rect.height);
-                            // 仅当类别为 blue(label=0) 且在有效高度范围内时才认为是障碍物
-                            if (box.label == 0 &&
-                                box_y2 < BZ_Y_UPPER_THRESHOLD && box_y2 > BZ_Y_LOWER_THRESHOLD) {
-                                obstacle_found_this_frame = true;
-                                blue_box = box;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (obstacle_found_this_frame) {
-                        bz_detect_count++;
-                        cout << "[避障检测] 发现蓝色障碍物，计数: " << bz_detect_count << "/" << BZ_DETECT_THRESHOLD << endl;
-                    } else {
-                        if (bz_detect_count > 0) {
-                            cout << "[避障检测] 障碍物消失或为非蓝色目标，重置计数" << endl;
-                        }
-                        bz_detect_count = 0;
-                    }
-
-                    if (bz_detect_count >= BZ_DETECT_THRESHOLD) {
-                        is_in_avoidance = true; // 启动并锁定避障状态
-                        cout << "[流程] 确认蓝色障碍物，进入避障模式（直接变速避障）" << endl;
-                        
-                        // 记录障碍物的初始位置（仅使用蓝色目标）
-                        int box_y2 = static_cast<int>(blue_box.rect.y + blue_box.rect.height);
-                        int box_x1 = static_cast<int>(blue_box.rect.x);
-                        int box_x2 = static_cast<int>(blue_box.rect.x + blue_box.rect.width);
-                        int box_y1 = static_cast<int>(blue_box.rect.y);
-                        last_known_bz_xcenter = (box_x1 + box_x2) / 2;
-                        last_known_bz_x1 = box_x1;
-                        last_known_bz_x2 = box_x2;
-                        last_known_bz_bottom = box_y2;
-                        last_known_bz_heighest = box_y1;
-                        bz_heighest = last_known_bz_heighest;
-
-                        // 立即执行第一次补线和避障巡线
-                        if (last_known_bz_xcenter > 160) { 
-                            bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x1, last_known_bz_bottom), cv::Point(int((right_line[0].x + right_line[1].x + right_line[2].x) / 3), 155), 8);
-                        } else { 
-                            bin_image = drawWhiteLine(bin_image, cv::Point(last_known_bz_x2, last_known_bz_bottom), cv::Point(int((left_line[0].x + left_line[1].x + left_line[2].x) / 3), 155), 8);
-                        }
-                        Tracking_bz(bin_image); 
-                        
-                        bz_detect_count = 0; // 重置计数器，避免重复进入
-                    }
+                    current_tracking_bias = TrackingBias::Center;
+                    current_lane_speed_delta = MOTOR_SPEED_DELTA_POST_ZEBRA;
                 }
             }
         }
