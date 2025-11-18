@@ -570,14 +570,14 @@ void Tracking(cv::Mat &dilated_image)
         // 计算中点
         const cv::Point &left_point = left_line.back();
         const cv::Point &right_point = right_line.back();
-        int mid_x = (left_point.x + right_point.x) / 2;
+        // int mid_x = (left_point.x + right_point.x) / 2;
         if (current_tracking_bias == TrackingBias::LeftQuarter)
         {
-            mid_x = (left_point.x + mid_x) / 2;
+            mid_x = (left_point.x + right_point.x) * (1/5);
         }
         else if (current_tracking_bias == TrackingBias::RightQuarter)
         {
-            mid_x = (right_point.x + mid_x) / 2;
+            mid_x = (right_point.x + mid_x) * (4/5);
         }
         mid.emplace_back(mid_x, i); // 记录中点
 
@@ -958,20 +958,16 @@ float servo_pd_bz(int target) { // 避障巡线控制
 }
 
 // 功能: 预入库阶段跟随AB目标的PD控制器，P和D参数较大，响应更灵敏
-float servo_pd_parking(int target) { // 跟随AB目标控制
+float servo_pd_parking(int ab_center_x) { // 跟随AB目标控制，ab_center_x是AB中心点x坐标
 
-    // 安全检查：确保mid向量有足够的元素
-    if (mid.size() < 26) {
-        cerr << "[警告] servo_pd_parking: mid向量元素不足 (" << mid.size() << " < 26)，返回中值" << endl;
-        return servo_pwm_mid;
-    }
+    const int IMAGE_CENTER_X = 160; // 图像中心x坐标，作为目标位置（类似巡线时的target）
+    int target = IMAGE_CENTER_X; // 目标位置（类似巡线时的target=160）
+    int pidx = ab_center_x; // AB中心点位置（类似巡线时的pidx）
 
-    int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
+    float kp = 4.0; 
+    float kd = 8.0; 
 
-    float kp = 5.0; 
-    float kd = 10.0; 
-
-    error_first = target - pidx; // 计算误差
+    error_first = target - pidx; // 计算误差：目标位置(160) - AB位置(pidx)
 
     servo_pwm_diff = kp * error_first + kd * (error_first - last_error); // 计算舵机PWM差值
 
@@ -1097,11 +1093,18 @@ void finalize_brief_stop_action()
             final_target_label = decided_label;
             // 初始化预入库阶段的变量
             parking_target_not_detected_count = 0;
-            parking_follow_x = 160; // 默认中心
+            // 如果parking_follow_x还是默认值（160），说明短暂停车前没有检测到目标，保持默认值
+            // 否则使用短暂停车前保存的目标位置
+            if (parking_follow_x == 160) {
+                cout << "[流程] 短暂停车结束，综合计数结果，开始预入库阶段 -> "
+                     << (final_target_label == 0 ? "A(左)" : "B(右)") 
+                     << "，将跟随最远的" << (final_target_label == 0 ? "A" : "B") << "目标（使用默认中心位置）" << endl;
+            } else {
+                cout << "[流程] 短暂停车结束，综合计数结果，开始预入库阶段 -> "
+                     << (final_target_label == 0 ? "A(左)" : "B(右)") 
+                     << "，将跟随最远的" << (final_target_label == 0 ? "A" : "B") << "目标（已保存位置 x=" << parking_follow_x << "）" << endl;
+            }
             parking_target_detected_this_frame = false;
-            cout << "[流程] 短暂停车结束，综合计数结果，开始预入库阶段 -> "
-                 << (final_target_label == 0 ? "A(左)" : "B(右)") 
-                 << "，将跟随最远的" << (final_target_label == 0 ? "A" : "B") << "目标" << endl;
             pending_pre_parking_label = -1;
         }
         else
@@ -1200,18 +1203,13 @@ void motor_servo_contral()
     if (is_pre_parking)
     {
         // 状态: 预入库阶段 - 跟随最远的A或B目标
-        // 如果检测到目标，使用目标x坐标跟随；否则使用巡线坐标
-        int target_x = parking_follow_x; // 默认使用上次记录的目标x坐标
-        if (parking_target_detected_this_frame && !mid.empty() && mid.size() >= 26)
-        {
-            // 仅当当前帧检测到目标时，才使用目标坐标更新
-            target_x = parking_follow_x;
-        }
+        // 始终使用上次检测到的目标x坐标（parking_follow_x）
+        // 如果目标消失，继续使用上次记录的位置，不启用巡线
+        int target_x = parking_follow_x;
         
         // 使用PD控制跟随目标x坐标（使用专门的parking PD控制器，P和D参数较大）
         servo_pwm_now = servo_pd_parking(target_x);
         gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
-        gpioPWM(servo_pin, servo_pwm_now);
     }
     else if (is_parking_phase)
     {
@@ -1424,7 +1422,7 @@ int main(int argc, char* argv[])
             else if (is_pre_parking)
             {
                 // 状态: 预入库阶段 - 跟随最远的A或B目标
-                Tracking(bin_image); // 继续巡线，用于检测不到时使用巡线坐标
+                // 不进行巡线，直接跟随A/B目标位置
                 current_tracking_bias = TrackingBias::Center;
                 current_lane_speed_delta = MOTOR_SPEED_DELTA_POST_ZEBRA;
                 
@@ -1461,16 +1459,16 @@ int main(int argc, char* argv[])
                              << "目标，跟随x坐标: " << parking_follow_x 
                              << "，y坐标: " << (int)farthest_y << endl;
                     } else {
-                        // 没有检测到匹配的目标，累加计数
+                        // 没有检测到匹配的目标，累加计数（继续使用上次记录的parking_follow_x）
                         parking_target_not_detected_count++;
                         cout << "[预入库] 未检测到" << (final_target_label == 0 ? "A" : "B") 
-                             << "目标，使用巡线坐标，未检测计数: " 
+                             << "目标，使用上次检测位置(x=" << parking_follow_x << ")，未检测计数: " 
                              << parking_target_not_detected_count << "/" << PARKING_DETECT_MISS_THRESHOLD << endl;
                     }
                 } else {
-                    // 没有检测到任何目标，累加计数
+                    // 没有检测到任何目标，累加计数（继续使用上次记录的parking_follow_x）
                     parking_target_not_detected_count++;
-                    cout << "[预入库] 未检测到任何目标，使用巡线坐标，未检测计数: " 
+                    cout << "[预入库] 未检测到任何目标，使用上次检测位置(x=" << parking_follow_x << ")，未检测计数: " 
                          << parking_target_not_detected_count << "/" << PARKING_DETECT_MISS_THRESHOLD << endl;
                 }
                 
@@ -1528,11 +1526,15 @@ int main(int argc, char* argv[])
 
                         // 检查是否达到入库阈值（短暂停车期间不触发新的停车）
                         if (closest_y2 >= PARKING_Y_THRESHOLD && !is_brief_stop_active) {
+                            // 保存当前检测到的目标位置，避免短暂停车后丢失
+                            float target_x = closest_box.rect.x + closest_box.rect.width / 2.0f;
+                            parking_follow_x = static_cast<int>(target_x);
+                            
                             is_parking_phase = false; // 寻找阶段结束
                             is_pre_parking = false;
                             pending_pre_parking_label = -1; // 停车后再根据最终计数决定
                             start_brief_stop(BriefStopType::Parking, BriefStopNextAction::EnterPreParking);
-                            cout << "[流程] 达到入库阈值，先短暂停车收集更多A/B计数再决策" << endl;
+                            cout << "[流程] 达到入库阈值，先短暂停车收集更多A/B计数再决策，已保存目标位置 x=" << parking_follow_x << endl;
                         }
                     }
                     else 
