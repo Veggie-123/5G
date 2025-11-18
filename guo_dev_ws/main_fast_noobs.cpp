@@ -569,14 +569,21 @@ void Tracking(cv::Mat &dilated_image)
         // 计算中点
         const cv::Point &left_point = left_line.back();
         const cv::Point &right_point = right_line.back();
-        // int mid_x = (left_point.x + right_point.x) / 2;
+        int mid_x;
         if (current_tracking_bias == TrackingBias::LeftQuarter)
         {
-            mid_x = (left_point.x + right_point.x) * (1/5);
+            // 偏左1/5位置：left + (right - left) * 0.2
+            mid_x = static_cast<int>(left_point.x + (right_point.x - left_point.x) * 0.2f);
         }
         else if (current_tracking_bias == TrackingBias::RightQuarter)
         {
-            mid_x = (right_point.x + mid_x) * (4/5);
+            // 偏右4/5位置：left + (right - left) * 0.8
+            mid_x = static_cast<int>(left_point.x + (right_point.x - left_point.x) * 0.8f);
+        }
+        else
+        {
+            // Center: 标准中心位置
+            mid_x = (left_point.x + right_point.x) / 2;
         }
         mid.emplace_back(mid_x, i); // 记录中点
 
@@ -1243,7 +1250,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.85f, 0.85f, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.7f, 0.7f, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
