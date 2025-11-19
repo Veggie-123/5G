@@ -23,7 +23,7 @@ const int BANMA_ROI_HEIGHT = 100;     // ROI高度 (减小)
 // 斑马线矩形筛选尺寸
 const int BANMA_RECT_MIN_WIDTH = 5;   // 矩形最小宽度 (调高以过滤噪点)
 const int BANMA_RECT_MAX_WIDTH = 40;  // 矩形最大宽度
-const int BANMA_RECT_MIN_HEIGHT = 5;   // 矩形最小高度
+const int BANMA_RECT_MIN_HEIGHT = 7;   // 矩形最小高度
 const int BANMA_RECT_MAX_HEIGHT = 40;  // 矩形最大高度 (调低以排除车道线)
 
 // 判定为斑马线需要的最少白色矩形数量 (根据实际情况调整)
@@ -78,7 +78,7 @@ int main(int argc, char** argv) {
 
     // 4. 顶帽变换 - 核心步骤，用于在复杂光照下突出白色条纹
     cv::Mat topHat;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 3));
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(40, 3));
     cv::morphologyEx(grayRoi, topHat, cv::MORPH_TOPHAT, kernel);
     imshow("4. Top-Hat Transform", topHat);
     cout << "按任意键继续..." << endl;
@@ -87,13 +87,13 @@ int main(int argc, char** argv) {
     // 5. 二值化
     cv::Mat binaryMask;
     // 顶帽变换后的图像，使用一个较低的固定阈值或OTSU效果都很好
-    cv::threshold(topHat, binaryMask, 50, 255, cv::THRESH_BINARY);
+    cv::threshold(topHat, binaryMask, 40, 255, cv::THRESH_BINARY);
     imshow("5. Thresholded Mask", binaryMask);
     cout << "按任意键继续..." << endl;
     waitKey(0);
 
     // 6. 形态学开运算（先腐蚀再膨胀），去除小的噪声点
-    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
     cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_OPEN, openKernel);
     imshow("6. Morphological Open", binaryMask);
     cout << "按任意键继续..." << endl;

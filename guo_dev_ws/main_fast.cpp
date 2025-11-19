@@ -25,7 +25,7 @@ using namespace cv; // 使用OpenCV命名空间
 bool program_finished = false; // 控制主循环退出的标志
 
 //------------速度参数配置------------------------------------------------------------------------------------------
-const int MOTOR_SPEED_DELTA_CRUISE = 1400; // 常规巡航速度增量
+const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
 const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
 const int MOTOR_SPEED_DELTA_BRAKE = -3000; // 瞬时反转/刹停增量
@@ -224,13 +224,13 @@ const int BANMA_WHITE_V_MIN = 200;  // 亮度V最小值（高亮度白色）
 const int BANMA_WHITE_V_MAX = 255;  // 亮度V最大值
 
 // 斑马线检测ROI区域
-const int BANMA_ROI_X = 40;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 100;          // ROI左上角Y坐标 (下移)
+const int BANMA_ROI_X = 60;           // ROI左上角X坐标
+const int BANMA_ROI_Y = 110;          // ROI左上角Y坐标 (下移)
 const int BANMA_ROI_WIDTH = 260;      // ROI宽度
-const int BANMA_ROI_HEIGHT = 100;     // ROI高度 (减小)
+const int BANMA_ROI_HEIGHT = 60;     // ROI高度 (减小)
 
 // 斑马线矩形筛选尺寸
-const int BANMA_RECT_MIN_WIDTH = 5;   // 矩形最小宽度 (调高以过滤噪点)
+const int BANMA_RECT_MIN_WIDTH = 7;   // 矩形最小宽度 (调高以过滤噪点)
 const int BANMA_RECT_MAX_WIDTH = 40;  // 矩形最大宽度
 const int BANMA_RECT_MIN_HEIGHT = 7;   // 矩形最小高度
 const int BANMA_RECT_MAX_HEIGHT = 40;  // 矩形最大高度 (调低以排除车道线)
@@ -839,15 +839,15 @@ int banma_get(cv::Mat &frame) {
 
     // 3. 顶帽变换 - 核心步骤，用于在复杂光照下突出白色条纹
     cv::Mat topHat;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 3));
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(40, 3));
     cv::morphologyEx(grayRoi, topHat, cv::MORPH_TOPHAT, kernel);
 
     // 4. 二值化
     cv::Mat binaryMask;
-    cv::threshold(topHat, binaryMask, 80, 255, cv::THRESH_BINARY);
+    cv::threshold(topHat, binaryMask, 40, 255, cv::THRESH_BINARY);
 
     // 5. 形态学开运算（先腐蚀再膨胀），去除小的噪声点
-    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::Mat openKernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
     cv::morphologyEx(binaryMask, binaryMask, cv::MORPH_OPEN, openKernel);
 
     // 6. 查找轮廓并应用尺寸筛选
@@ -950,8 +950,8 @@ float servo_pd_parking(int ab_center_x) { // 跟随AB目标控制，ab_center_x�
     int target = IMAGE_CENTER_X; // 目标位置（类似巡线时的target=160）
     int pidx = ab_center_x; // AB中心点位置（类似巡线时的pidx）
 
-    float kp = 4.0; 
-    float kd = 8.0; 
+    float kp = 2.0; 
+    float kd = 4.0; 
 
     error_first = target - pidx; // 计算误差：目标位置(160) - AB位置(pidx)
 
@@ -1232,7 +1232,7 @@ int main(int argc, char* argv[])
 
     cout << "[初始化] 加载车库检测模型..." << endl;
     try {
-        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.3f, 0.3, 4, false);
+        fastestdet_ab = new FastestDet(model_param_ab, model_bin_ab, num_classes_ab, labels_ab, 352, 0.8f, 0.8f, 4, false);
         cout << "[初始化] 车库检测模型加载成功!" << endl;
     } catch (const std::exception& e) {
         cerr << "[错误] 车库检测模型加载失败: " << e.what() << endl;
