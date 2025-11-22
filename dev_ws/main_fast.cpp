@@ -25,7 +25,7 @@ using namespace cv; // 使用OpenCV命名空间
 bool program_finished = false; // 控制主循环退出的标志
 
 //------------速度参数配置------------------------------------------------------------------------------------------
-const int MOTOR_SPEED_DELTA_CRUISE = 1300; // 常规巡航速度增量
+const int MOTOR_SPEED_DELTA_CRUISE = 1500; // 常规巡航速度增量
 const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
 const int MOTOR_SPEED_DELTA_BRAKE = -3000; // 瞬时反转/刹停增量
@@ -137,7 +137,7 @@ bool is_pre_parking = false; // 是否在预入库阶段
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
-const int PARKING_Y_THRESHOLD = 120; // 触发入库的Y轴阈值
+const int PARKING_Y_THRESHOLD = 110; // 触发入库的Y轴阈值
 int final_target_label = -1;       // 最终锁定的AB标志的label (0 for A, 1 for B)
 
 // 发车延时相关：挡板移开后等待3秒再开始电机/舵机控制
@@ -217,7 +217,7 @@ const double BLUE_REMOVE_AREA_MIN = 500.0; // 移开检测的最小面积阈值�
 //---------------斑马线检测参数（可调节）------------------------------------------
 // 斑马线检测ROI区域
 const int BANMA_ROI_X = 10;           // ROI左上角X坐标
-const int BANMA_ROI_Y = 130;          // ROI左上角Y坐标 (下移)
+const int BANMA_ROI_Y = 120;          // ROI左上角Y坐标 (下移)
 const int BANMA_ROI_WIDTH = 300;      // ROI宽度
 const int BANMA_ROI_HEIGHT = 60;     // ROI高度 (减小)
 
@@ -878,7 +878,7 @@ float servo_pd(int target) { // 赛道巡线控制
 
     int pidx = int((mid[23].x + mid[25].x) / 2); // 计算中线中点的x坐标
 
-    float kp = 0.8; // 比例系数
+    float kp = 0.5; // 比例系数
     float kd = 2.0; // 微分系数
 
     error_first = target - pidx; // 计算误差
