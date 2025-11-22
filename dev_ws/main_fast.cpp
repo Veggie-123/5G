@@ -1335,7 +1335,7 @@ int main(int argc, char* argv[])
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - zebra_stop_start_time).count();
 
                 // 在3秒停车时间内，持续检测转向标志
-                if (elapsed < 3)
+                if (elapsed < 4)
                 {
                     if (!has_detected_turn_sign)
                     { // 避免重复检测和打印
@@ -1355,7 +1355,7 @@ int main(int argc, char* argv[])
                     flag_turn_done = 1;      // 标记"变道"阶段已完成（跳过）
                     is_in_post_zebra_delay = true; // 进入巡线延迟阶段
                     post_zebra_delay_start_time = std::chrono::steady_clock::now(); // 启动延迟计时器
-                    cout << "[流程] 停车结束，开始2秒常规巡线..." << endl;
+                    cout << "[流程] 停车结束，开始4秒常规巡线..." << endl;
                 }
             }
             else if (is_in_post_zebra_delay)
@@ -1364,12 +1364,12 @@ int main(int argc, char* argv[])
                 Tracking(bin_image); // 正常巡线
 
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - post_zebra_delay_start_time).count();
-                if (elapsed >= 2)
+                if (elapsed >= 4)
                 {
                     // 1秒延迟结束，开始寻找车库
                     is_in_post_zebra_delay = false;
                     is_parking_phase = true;
-                    cout << "[流程] 2秒巡线结束，开始寻找并识别A/B车库" << endl;
+                    cout << "[流程] 4秒巡线结束，开始寻找并识别A/B车库" << endl;
                 }
             }
             else if (is_pre_parking)
