@@ -134,6 +134,8 @@ std::chrono::steady_clock::time_point post_zebra_delay_start_time; // Timer for 
 bool is_in_post_zebra_delay = false; // Flag for delay state after zebra crossing
 bool is_parking_phase = false; // 是否进入寻找车库阶段
 bool is_pre_parking = false; // 是否在预入库阶段
+bool is_post_pre_parking_cruise = false; // 预入库完成后的巡线阶段
+std::chrono::steady_clock::time_point post_pre_parking_cruise_start_time; // 预入库后巡线开始时间
 int latest_park_id = 0; // 最近检测到的车库ID (1=A, 2=B)
 int park_A_count = 0; // A车库累计识别次数
 int park_B_count = 0; // B车库累计识别次数
@@ -1159,6 +1161,12 @@ void motor_servo_contral()
         servo_pwm_now = servo_pd_parking(target_x);
         gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
     }
+    else if (is_post_pre_parking_cruise)
+    {
+        // 状态: 预入库完成后的巡线阶段 - 执行常规巡线控制
+        servo_pwm_now = servo_pd(160); // 使用常规PD控制
+        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_CRUISE); // 使用常规速度
+    }
     else if (is_parking_phase)
     {
         // 状态4: 寻找并进入车库
@@ -1426,7 +1434,24 @@ int main(int argc, char* argv[])
                 // 检查是否达到停车阈值
                 if (parking_target_not_detected_count >= PARKING_DETECT_MISS_THRESHOLD) {
                     cout << "[流程] 预入库完成（连续" << PARKING_DETECT_MISS_THRESHOLD 
-                         << "帧未检测到目标），刹车！" << endl;
+                         << "帧未检测到目标），开始巡线1秒后再停车" << endl;
+                    is_pre_parking = false; // 退出预入库阶段
+                    is_post_pre_parking_cruise = true; // 进入巡线阶段
+                    post_pre_parking_cruise_start_time = std::chrono::steady_clock::now(); // 记录开始时间
+                }
+            }
+            else if (is_post_pre_parking_cruise)
+            {
+                // 状态: 预入库完成后的巡线阶段 - 巡线2秒后停车
+                Tracking(bin_image); // 正常巡线
+                
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - post_pre_parking_cruise_start_time).count();
+                
+                if (elapsed >= 1) {
+                    // 2秒巡线结束，停车并显示高分辨率图像
+                    cout << "[流程] 1秒巡线完成，开始停车并显示高分辨率图像" << endl;
+                    is_post_pre_parking_cruise = false;
                     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock); // 停车
                     
                     // 关闭当前摄像头
