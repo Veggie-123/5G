@@ -1160,6 +1160,13 @@ void motor_servo_contral()
         servo_pwm_now = servo_pd_parking(target_x);
         gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_PARK);
     }
+    else if (is_in_post_zebra_delay)
+    {
+        // 状态: 斑马线后延迟巡线（识别到斑马线停车之后，识别AB之前）
+        // 使用不同于寻找斑马线的速度
+        servo_pwm_now = servo_pd(160);
+        gpioPWM(motor_pin, motor_pwm_mid + MOTOR_SPEED_DELTA_SEARCHING_PARK);
+    }
     else if (is_parking_phase)
     {
         // 状态4: 寻找并进入车库
