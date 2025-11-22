@@ -34,7 +34,7 @@ const float BRIEF_STOP_REVERSE_DURATION = 0.5f; // 反转阶段持续时间（�
 const float BRIEF_STOP_HOLD_DURATION = 0.1f;    // 刹停保持时间（秒）
 
 //---------------调试选项-------------------------------------------------
-const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
+const bool SHOW_SOBEL_DEBUG = true; // 是否显示Sobel调试窗口
 const int SOBEL_DEBUG_REFRESH_INTERVAL_MS = 120; // 调试窗口刷新间隔，减轻imshow开销
 
 //---------------性能统计---------------------------------------------------
@@ -120,7 +120,7 @@ int last_known_bz_heighest = 0;
 int count_bz = 0; // 避障计数器
 int bz_disappear_count = 0; // 障碍物连续消失计数
 const int BZ_DISAPPEAR_THRESHOLD = 3; // 确认障碍物消失的帧数阈值
-const int BZ_Y_UPPER_THRESHOLD = 170; // 可见障碍物底部阈值 (上限)
+const int BZ_Y_UPPER_THRESHOLD = 200; // 可见障碍物底部阈值 (上限)
 const int BZ_Y_LOWER_THRESHOLD = 40; // 触发避障的Y轴下限阈值 (下限)
 
 int bz_detect_count = 0; // 障碍物连续检测计数
@@ -384,10 +384,10 @@ cv::Mat ImageSobel(cv::Mat &frame, cv::Mat *debugOverlay = nullptr)
     cv::morphologyEx(blurredRoi, topHat, cv::MORPH_TOPHAT, kernel_tophat);
 
     cv::Mat adaptiveMask;
-    cv::threshold(topHat, adaptiveMask, 3, 255, cv::THRESH_BINARY);
+    cv::threshold(topHat, adaptiveMask, 10, 255, cv::THRESH_BINARY);
 
     cv::Mat gradientMask;
-    cv::threshold(gradientMagnitude8U, gradientMask, 10, 255, cv::THRESH_BINARY); // 梯度二值掩码
+    cv::threshold(gradientMagnitude8U, gradientMask, 50, 255, cv::THRESH_BINARY); // 梯度二值掩码
     static cv::Mat kernel_gradient_dilate = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
     cv::dilate(gradientMask, gradientMask, kernel_gradient_dilate);
 
