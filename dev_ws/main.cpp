@@ -30,8 +30,13 @@ const int MOTOR_SPEED_DELTA_AVOID = 1100;  // 避障阶段速度增量
 const int MOTOR_SPEED_DELTA_PARK = 1000;   // 车库阶段速度增量
 const int MOTOR_SPEED_DELTA_BRAKE = -3000; // 瞬时反转/刹停增量
 
+//------------时间参数配置（单位：秒）------------------------------------------------------------------------------------------
 const float BRIEF_STOP_REVERSE_DURATION = 0.5f; // 反转阶段持续时间（秒）
 const float BRIEF_STOP_HOLD_DURATION = 0.1f;    // 刹停保持时间（秒）
+const float START_DELAY_SECONDS = 2.0f;              // 发车延时时间（秒）
+const float ZEBRA_STOP_DURATION_SECONDS = 4.0f;      // 斑马线停车持续时间（秒）
+const float POST_ZEBRA_DELAY_SECONDS = 4.0f;        // 斑马线后巡线延迟时间（秒）
+const float BANMA_STOP_SLEEP_SECONDS = 0.5f;        // 斑马线停车后的延时（秒）
 
 //---------------调试选项-------------------------------------------------
 const bool SHOW_SOBEL_DEBUG = false; // 是否显示Sobel调试窗口
@@ -48,7 +53,7 @@ std::vector<DetectObject> result_ab; // 存储FastestDet检测结果
 
 enum class CarState {
     Idle,           // 等待发车
-    StartDelay,     // 2秒延时
+    StartDelay,     // 发车延时
     Cruise,         // 正常行驶
     Avoidance,      // 避障
     ZebraStop,      // 在斑马线处等待
@@ -145,7 +150,7 @@ int park_B_count = 0; // B车库累计识别次数
 const int PARKING_Y_THRESHOLD = 120; // 触发入库的Y轴阈值
 int final_target_label = -1;       // 最终锁定的AB标志的标签（0表示A，1表示B）
 
-// 发车延时相关：挡板移开后等待3秒再开始电机/舵机控制
+// 发车延时相关：挡板移开后等待指定时间再开始电机/舵机控制
 std::chrono::steady_clock::time_point start_delay_time; // 挡板移开时间戳
 
 //----------------图像保存相关---------------------------------------------------
@@ -806,7 +811,7 @@ void blue_card_remove(void) // 输入为mask图像
     {
         current_state = CarState::StartDelay;
         start_delay_time = std::chrono::steady_clock::now();
-        // 挡板移开后开始计时，延时2秒再允许控制函数运行
+        // 挡板移开后开始计时，延时指定时间再允许控制函数运行
     } 
     else 
     {
@@ -961,8 +966,8 @@ float servo_pd_parking(int ab_center_x) { // 跟随AB目标控制，ab_center_x�
 // 功能: 斑马线触发停车：电机回中、舵机回中并输出日志
 void banma_stop(){
     gpioPWM(motor_pin, motor_pwm_duty_cycle_unlock - 3000); // 解锁状态，即停车
-    usleep(500000);
-    cout << "[流程] 检测到斑马线，车辆停车3秒等待指令" << endl;
+    usleep(static_cast<useconds_t>(BANMA_STOP_SLEEP_SECONDS * 1000000)); // 转换为微秒
+    cout << "[流程] 检测到斑马线，车辆停车" << static_cast<int>(ZEBRA_STOP_DURATION_SECONDS) << "秒等待指令" << endl;
 }
 
 // 功能: 在图像上绘制时间戳（加8小时时差）并保存
@@ -1231,8 +1236,8 @@ int main(int argc, char* argv[])
             // 特殊状态的时间检查与自动状态跃迁
             if (current_state == CarState::StartDelay) {
                 auto now = std::chrono::steady_clock::now();
-                auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(now - start_delay_time).count();
-                if (elapsed_sec >= 2) {
+                auto elapsed_sec = std::chrono::duration_cast<std::chrono::microseconds>(now - start_delay_time).count() / 1000000.0;
+                if (elapsed_sec >= START_DELAY_SECONDS) {
                     cout << "[流程] 发车延时结束，开始巡航" << endl;
                     current_state = CarState::Cruise;
                 }
@@ -1410,9 +1415,9 @@ int main(int argc, char* argv[])
 
             case CarState::ZebraStop:
                 {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - zebra_stop_start_time).count();
-                    if (elapsed < 4) {
-                        // 在4秒停车时间内，持续检测转向标志
+                    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - zebra_stop_start_time).count() / 1000000.0;
+                    if (elapsed < ZEBRA_STOP_DURATION_SECONDS) {
+                        // 在停车时间内，持续检测转向标志
                         if (!has_detected_turn_sign) {
                             result.clear();
                             result = fastestdet_lr->detect(frame);
@@ -1422,8 +1427,8 @@ int main(int argc, char* argv[])
                             }
                         }
                     } else {
-                        // 4秒结束，无论是否识别到转向标识，都继续巡线
-                        cout << "[流程] 停车结束，开始4秒常规巡线..." << endl;
+                        // 停车时间结束，无论是否识别到转向标识，都继续巡线
+                        cout << "[流程] 停车结束，开始" << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒常规巡线..." << endl;
                         flag_turn_done = 1;
                         post_zebra_delay_start_time = std::chrono::steady_clock::now();
                         current_state = CarState::PostZebra;
@@ -1434,10 +1439,10 @@ int main(int argc, char* argv[])
             case CarState::PostZebra:
                 Tracking(bin_image); // 正常巡线
                 {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - post_zebra_delay_start_time).count();
-                    if (elapsed >= 4) {
-                        // 4秒延迟结束，开始寻找车库
-                        cout << "[流程] 4秒巡线结束，开始寻找并识别A/B车库" << endl;
+                    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - post_zebra_delay_start_time).count() / 1000000.0;
+                    if (elapsed >= POST_ZEBRA_DELAY_SECONDS) {
+                        // 延迟时间结束，开始寻找车库
+                        cout << "[流程] " << static_cast<int>(POST_ZEBRA_DELAY_SECONDS) << "秒巡线结束，开始寻找并识别A/B车库" << endl;
                         current_state = CarState::ParkingSearch;
                     }
                 }
